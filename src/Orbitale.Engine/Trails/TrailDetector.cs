@@ -25,7 +25,9 @@ public static class TrailDetector
 {
     internal const int StarDilate = 7; // px, must exceed star drift between frames
     internal const int MinBlob = 4; // drop residual blobs smaller than this (px)
-    const double MinLength = 0.03;  // fraction of the long side
+    internal const double MinLength = 0.03;  // fraction of the long side
+    internal const double ShortMinLength = 0.01;   // aligned path: Euclidean minimum, fraction of the long side (slow planes),
+    const int ShortMinPixels = 20;                 // and at least 20 px (= 0.01 of the 2000 px detection long side)
     const double MergeAngleDeg = 2;      // distinct lines: pieces within this angle,
     const double MergeDistance = 4;      // this perpendicular distance (detection px)
     const double MergeGap = 25;          // and overlapping or this close end to end (detection px) are one line
@@ -51,26 +53,26 @@ public static class TrailDetector
     /// <summary>
     /// The detection pipeline after the residual: 3×3 blur, robust threshold, small-blob removal, HoughLinesP and the fill
     /// check. <paramref name="residual"/> (CV_32FC1, not modified) is "frame − star-tolerant reference" at detection scale.
-    /// The minimum length is the prototype's 0.03 of the long side. With <paramref name="euclideanLength"/> (the sky-aligned
-    /// path) it is measured as a Euclidean length: OpenCV's HoughLinesP checks its minimum per axis (|dx| or |dy|), which
-    /// drops a diagonal up to √2 times longer, so it is given min/√2 and the length is checked here. Otherwise (the
-    /// prototype port) the minimum is passed to HoughLinesP as is.
+    /// With <paramref name="shortPieces"/> (the sky-aligned path) the minimum length is <see cref="ShortMinLength"/> of
+    /// the long side (at least 20 px), measured as a Euclidean length: OpenCV's HoughLinesP checks its minimum per axis (|dx| or |dy|),
+    /// which would drop a diagonal up to √2 times longer, so it is given min/√2 and the length is checked here.
+    /// Otherwise it is the prototype's 0.03 of the long side, passed to HoughLinesP as is.
     /// </summary>
-    internal static TrailDetection DetectResidual(Mat residual, TrailSettings s, bool euclideanLength = false)
+    internal static TrailDetection DetectResidual(Mat residual, TrailSettings s, bool shortPieces = false)
     {
         using var binary = Binarize(residual, s.Sigma);
         RemoveSmallBlobs(binary);
 
         int h = binary.Rows, w = binary.Cols;
-        int minLen = (int)(MinLength * Math.Max(h, w));
-        int houghMinLen = euclideanLength ? (int)Math.Floor(minLen / Math.Sqrt(2)) : minLen;
+        int minLen = shortPieces ? Math.Max(ShortMinPixels, (int)(ShortMinLength * Math.Max(h, w))) : (int)(MinLength * Math.Max(h, w));
+        int houghMinLen = shortPieces ? (int)Math.Floor(minLen / Math.Sqrt(2)) : minLen;
         // OpenCvSharp already returns one entry per segment, so the prototype's reshape(-1, 4) is implicit.
         var lines = Cv2.HoughLinesP(binary, 1, Math.PI / 720, Math.Max(20, minLen / 2), houghMinLen, MaxGap);
 
         var kept = new List<LineSegment>();
         foreach (var l in lines)
         {
-            if (euclideanLength && Math.Sqrt((double)(l.P2.X - l.P1.X) * (l.P2.X - l.P1.X) + (double)(l.P2.Y - l.P1.Y) * (l.P2.Y - l.P1.Y)) < minLen) continue;
+            if (shortPieces && Math.Sqrt((double)(l.P2.X - l.P1.X) * (l.P2.X - l.P1.X) + (double)(l.P2.Y - l.P1.Y) * (l.P2.Y - l.P1.Y)) < minLen) continue;
             if (Fill(binary, l.P1.X, l.P1.Y, l.P2.X, l.P2.Y) is double fill && fill < MinFill) continue;
             kept.Add(new LineSegment(l.P1.X, l.P1.Y, l.P2.X, l.P2.Y));
         }

@@ -54,9 +54,9 @@ public static class TrailRemover
     /// (<see cref="AlignedNeighbour.ToCurrent"/>). A pixel is a trail candidate only if it is new against both the static
     /// median of the neighbours (the landscape cancels) and the median of the neighbours with their sky rotated into this
     /// frame (the stars cancel). The repair takes the aligned median in the sky and the static median in the landscape.
-    /// With an alignment, the 0.03 minimum length is measured as a Euclidean length (OpenCV checks it per axis, which drops
-    /// short diagonals). Shorter pieces are not kept: a slow plane's per-frame piece below 0.03 of the long side is a known
-    /// miss (accepting them chopped star trails; see the Task 8b report). When no alignment is known the
+    /// With an alignment, lengths are Euclidean (OpenCV checks them per axis, which drops diagonals): pieces of at least
+    /// 0.03 of the long side are kept as before, and pieces down to 0.01 (a slow plane's per-frame piece) only when they
+    /// cross the local star motion by at least 20°. When no alignment is known the
     /// detection and repair are exactly the unaligned prototype port. <see cref="TrailCleanResult.Segments"/> are the
     /// distinct lines (collinear Hough pieces merged), which is what a user counts as trails.
     /// </summary>
@@ -94,7 +94,12 @@ public static class TrailRemover
 
         // Guard against static structures (a lit road, a wire, the horizon): keep only segments that are
         // bright in this frame but not in the neighbour median(s). Detection itself stays a pure prototype port.
-        var transient = detection.Segments.Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
+        // Aligned path: short pieces (under the prototype's 0.03 of the long side) are kept only when they cross the local
+        // star motion; along it they are what star residues look like where the alignment misfits.
+        double longMin = TrailDetector.MinLength * Math.Max(detSize.Width, detSize.Height);
+        var transient = detection.Segments
+            .Where(g => alignedGray is null || Length(g) >= longMin || CrossesStarMotion(g, neighbours, sx, sy))
+            .Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
         if (transient.Count == 0)
             return new TrailCleanResult(frame.Clone(), []);
         using var trailMask = transient.Count == detection.Segments.Count
@@ -127,6 +132,33 @@ public static class TrailRemover
         return new TrailCleanResult(Blend(frame, median, weight), segments);
     }
 
+    const double ShortPieceMinAngle = 20;   // degrees between a short piece and the local star motion (undirected)
+    const double MotionMinPixels = 0.5;     // full-res px: below this the star motion has no direction
+
+    static double Length(LineSegment g) => Math.Sqrt((double)(g.X2 - g.X1) * (g.X2 - g.X1) + (double)(g.Y2 - g.Y1) * (g.Y2 - g.Y1));
+
+    /// <summary>
+    /// True when the piece <paramref name="g"/> (detection px) runs at least 20° (undirected lines, 0..90°) away from the
+    /// local star motion at its midpoint: the displacement of that point under the neighbour warp with the smallest
+    /// motion there (the nearest in time). False when no neighbour has a warp or the stars barely move there.
+    /// </summary>
+    static bool CrossesStarMotion(LineSegment g, IReadOnlyList<AlignedNeighbour> neighbours, double sx, double sy)
+    {
+        double mx = ((g.X1 + g.X2) / 2.0 + 0.5) * sx - 0.5, my = ((g.Y1 + g.Y2) / 2.0 + 0.5) * sy - 0.5;
+        double bestX = 0, bestY = 0, best = double.PositiveInfinity;
+        foreach (var n in neighbours)
+        {
+            if (n.ToCurrent is not { } m) continue;
+            var (tx, ty) = m.Map(mx, my);
+            double dx = tx - mx, dy = ty - my;
+            double d = Math.Sqrt(dx * dx + dy * dy);
+            if (d >= MotionMinPixels && d < best) (best, bestX, bestY) = (d, dx, dy);
+        }
+        if (double.IsPositiveInfinity(best)) return false;
+        double angle = Math.Abs(Math.Atan2((g.Y2 - g.Y1) * sy, (g.X2 - g.X1) * sx) - Math.Atan2(bestY, bestX)) * 180 / Math.PI % 180;
+        return Math.Min(angle, 180 - angle) >= ShortPieceMinAngle;
+    }
+
     /// <summary>
     /// Detection residual = per-pixel min(frame − dilate(static median, 7), frame − dilate(aligned median, 3)), i.e. light
     /// that is new against both references, then the prototype's pipeline.
@@ -136,7 +168,7 @@ public static class TrailRemover
         using var rStatic = TrailDetector.StarTolerantResidual(frameGray, staticGray, TrailDetector.StarDilate);
         using var rAligned = TrailDetector.StarTolerantResidual(frameGray, alignedGray, AlignedStarDilate);
         Cv2.Min(rStatic, rAligned, rStatic);
-        return TrailDetector.DetectResidual(rStatic, s, euclideanLength: true);
+        return TrailDetector.DetectResidual(rStatic, s, shortPieces: true);
     }
 
     /// <summary>

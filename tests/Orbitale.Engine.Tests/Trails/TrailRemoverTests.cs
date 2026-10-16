@@ -314,16 +314,27 @@ public class TrailRemoverTests(ITestOutputHelper output)
                 TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y)), r.Segments.ToList());
     }
 
-    [Fact] public void ShortSlowPlanePieceIsAKnownMiss()
+    [Fact] public void RemovesShortSlowPlanePieceAcrossTheStarMotion()
     {
-        // A slow plane records only a short piece per exposure. This one is 30 detection px (dx = dy = 21), under the 0.03
-        // x long side minimum (60 detection px), across the star motion. Shorter minimums were tried on the real data and
-        // chopped star trails (Task 8b report, fix rounds 1-3), so such pieces are left in place: a known limit.
+        // A slow plane records only a short piece per exposure: 30 detection px (dx = dy = 21 detection px), under the
+        // prototype's 0.03 x long side (60 detection px) and under OpenCV's per-axis length check for any minimum above
+        // 21. It runs at 135 deg, about 89 deg from the local star motion: short pieces that cross the motion are planes.
         var a = new Point(1042, 400); var b = new Point(1000, 442);
         var (before, after, segments) = CleanWithLine(35, a, b, 4);
         output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
+        Assert.Contains(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 4);
+        Assert.True(after < before * 0.05, $"mean diff along the piece {before:F4} -> {after:F4}");
+    }
+
+    [Fact] public void IgnoresShortLineAlongTheStarMotion()
+    {
+        // The same 30 detection px piece at 45 deg, within 1-2 deg of the local star motion: short lines along the motion
+        // are what star residues look like (misalignment at the frame edges), so they are not accepted, even when real.
+        var a = new Point(1000, 400); var b = new Point(1042, 442);
+        var (before, after, segments) = CleanWithLine(35, a, b, 4);
+        output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
         Assert.DoesNotContain(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6
-                                             && Math.Min(s.X1, s.X2) < a.X + 20 && Math.Max(s.X1, s.X2) > b.X - 20);
+                                             && Math.Min(s.X1, s.X2) < b.X + 20 && Math.Max(s.X1, s.X2) > a.X - 20);
         Assert.True(after > before * 0.9, $"the piece was repaired: {before:F4} -> {after:F4}");
     }
 
