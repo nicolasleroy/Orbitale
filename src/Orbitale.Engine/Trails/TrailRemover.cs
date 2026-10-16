@@ -22,7 +22,8 @@ public static class TrailRemover
     const double SideOffset = 8.0;          // static-line guard: background samples beside the segment, detection px
     const double StaticContrastRatio = 0.5; // median contrast at or above this fraction of the frame's = static
     const int StarMaxSide = 15;             // star blob bounding box, detection-scale px
-    const double StarMaxAspect = 2.0;       // longer / shorter bbox side
+    const double StarMaxAspect = 2.0;       // axis ratio from second moments (eigenvalue ratio <= 4)
+    const double StarAxisClearance = 3.0;   // blobs centred closer than this to a trail axis are trail, detection px
     const double StarMargin = 2.0;          // protected disc = blob radius + margin, full-res px
     const double StarFeather = 2.0;         // linear fall-off beyond the disc, full-res px
 
@@ -64,7 +65,7 @@ public static class TrailRemover
             var segments = transient.Select(g => new LineSegment(X(g.X1), Y(g.Y1), X(g.X2), Y(g.Y2))).ToList();
 
             using var weight = FeatheredWeight(trailMask, frame.Size(), Math.Max(sx, sy));
-            ProtectStars(weight, frameGray, medianGray, trailMask, s.Sigma, sx, sy);
+            ProtectStars(weight, frameGray, medianGray, trailMask, transient, s.Sigma, sx, sy);
             return new TrailCleanResult(Blend(frame, median, weight), segments);
         }
     }
@@ -131,10 +132,12 @@ public static class TrailRemover
     /// The neighbour median does not hold this frame's stars where they drifted, so a plain repair would erase
     /// the stars inside the trail corridor. Finds the frame's own compact residual blobs (frame − median) that
     /// reach into the trail mask at detection scale and zeroes the repair weight in a feathered disc around each one.
-    /// Elongated blobs (the trail, its dashes) stay repaired, and so do their pixels inside a star's disc.
+    /// Elongated blobs (second-moment axis ratio > 2) and blobs on a trail axis (dashes) stay repaired, and so do
+    /// their pixels inside a star's disc.
     /// A star lying on the trail line merges with the trail blob and is not protected.
     /// </summary>
-    static unsafe void ProtectStars(Mat weight, Mat frameGray, Mat medianGray, Mat trailMask, double sigma, double sx, double sy)
+    static unsafe void ProtectStars(Mat weight, Mat frameGray, Mat medianGray, Mat trailMask, IReadOnlyList<LineSegment> axes,
+                                    double sigma, double sx, double sy)
     {
         using var residual = new Mat();
         Cv2.Subtract(frameGray, medianGray, residual);
@@ -143,29 +146,45 @@ public static class TrailRemover
         Cv2.Compare(residual, Scalar.All(threshold), binary, CmpTypes.GT);
 
         // Blobs are measured whole (not clipped to the corridor, which would make a star at its edge look
-        // elongated); a star is a compact blob that reaches into the trail mask.
+        // elongated). A star is a compact blob that reaches into the trail mask and is not on a trail axis.
         using var labels = new Mat();
         using var stats = new Mat();
         using var centroids = new Mat();
         int n = Cv2.ConnectedComponentsWithStats(binary, labels, stats, centroids, PixelConnectivity.Connectivity8);
         int detRows = binary.Rows, detCols = binary.Cols;
         var inMask = new bool[n];
+        var sxx = new double[n]; var syy = new double[n]; var sxy = new double[n];   // second moments about the centroid
+        var ccx = new double[n]; var ccy = new double[n];
+        for (int i = 1; i < n; i++) { ccx[i] = centroids.At<double>(i, 0); ccy[i] = centroids.At<double>(i, 1); }
         for (int r = 0; r < detRows; r++)
         {
             int* lab = (int*)labels.Ptr(r);
             byte* m = (byte*)trailMask.Ptr(r);
             for (int c = 0; c < detCols; c++)
-                if (m[c] != 0) inMask[lab[c]] = true;
+            {
+                int l = lab[c];
+                if (l == 0) continue;
+                if (m[c] != 0) inMask[l] = true;
+                double dx = c - ccx[l], dy = r - ccy[l];
+                sxx[l] += dx * dx; syy[l] += dy * dy; sxy[l] += dx * dy;
+            }
         }
-        var compact = new bool[n];
+        var star = new bool[n];
         bool anyStar = false;
         for (int i = 1; i < n; i++)
         {
+            if (!inMask[i]) continue;
             int bw = stats.At<int>(i, (int)ConnectedComponentsTypes.Width), bh = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
             int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
-            compact[i] = area >= TrailDetector.MinBlob && bw <= StarMaxSide && bh <= StarMaxSide
-                         && Math.Max(bw, bh) <= StarMaxAspect * Math.Min(bw, bh);
-            anyStar |= compact[i] && inMask[i];
+            if (area < TrailDetector.MinBlob || bw > StarMaxSide || bh > StarMaxSide) continue;
+            // Elongation from the covariance eigenvalues (a bounding box is square for a 45 deg dash).
+            double a = sxx[i] / area, d = syy[i] / area, b = sxy[i] / area;
+            double mid = (a + d) / 2, half = Math.Sqrt((a - d) * (a - d) / 4 + b * b);
+            double lmax = mid + half, lmin = mid - half;
+            if (lmax > StarMaxAspect * StarMaxAspect * lmin) continue;
+            // Dashes sit on the axis; stars that close are lost anyway (they merge with a solid trail).
+            if (axes.Any(g => DistanceToSegment(ccx[i], ccy[i], g) < StarAxisClearance)) continue;
+            anyStar |= star[i] = true;
         }
         if (!anyStar) return;
 
@@ -176,7 +195,7 @@ public static class TrailRemover
             int* lab = (int*)labels.Ptr(r);
             byte* t = (byte*)trail.Ptr(r);
             for (int c = 0; c < detCols; c++)
-                if (lab[c] > 0 && !compact[lab[c]]) t[c] = 255;
+                if (lab[c] > 0 && !star[lab[c]]) t[c] = 255;
         }
         using (var k = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(3, 3)))
             Cv2.Dilate(trail, trail, k);
@@ -185,7 +204,7 @@ public static class TrailRemover
         int fullW = weight.Cols, fullH = weight.Rows;
         for (int i = 1; i < n; i++)
         {
-            if (!compact[i] || !inMask[i]) continue;
+            if (!star[i]) continue;
             int bw = stats.At<int>(i, (int)ConnectedComponentsTypes.Width), bh = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
             double cx = (centroids.At<double>(i, 0) + 0.5) * sx - 0.5, cy = (centroids.At<double>(i, 1) + 0.5) * sy - 0.5;
             double radius = Math.Max(bw, bh) / 2.0 * scale + StarMargin, outer = radius + StarFeather;
@@ -204,6 +223,14 @@ public static class TrailRemover
                 }
             }
         }
+    }
+
+    static double DistanceToSegment(double x, double y, LineSegment g)
+    {
+        double dx = g.X2 - g.X1, dy = g.Y2 - g.Y1, l2 = dx * dx + dy * dy;
+        double t = l2 == 0 ? 0 : Math.Clamp(((x - g.X1) * dx + (y - g.Y1) * dy) / l2, 0, 1);
+        double px = g.X1 + t * dx - x, py = g.Y1 + t * dy - y;
+        return Math.Sqrt(px * px + py * py);
     }
 
     /// <summary>out = frame·(1−w) + median·w, per channel.</summary>

@@ -59,15 +59,15 @@ public static class SyntheticSky
         return frames;
     }
 
-    /// <summary>Draws a 1 px streak of <paramref name="value"/> (all channels) on one frame; dashed = 30 px on, 15 px off.</summary>
-    public static void DrawStreak(Mat m, Point a, Point b, double value, bool dashed)
+    /// <summary>Draws a 1 px streak of <paramref name="value"/> (all channels) on one frame; dashed = <paramref name="dash"/> px on, <paramref name="gap"/> px off.</summary>
+    public static void DrawStreak(Mat m, Point a, Point b, double value, bool dashed, int dash = 30, int gap = 15)
     {
         if (!dashed) { Cv2.Line(m, a, b, Scalar.All(value), 1); return; }
         double len = Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
         double ux = (b.X - a.X) / len, uy = (b.Y - a.Y) / len;
-        for (double t = 0; t < len; t += 45)
+        for (double t = 0; t < len; t += dash + gap)
         {
-            double t2 = Math.Min(t + 30, len);
+            double t2 = Math.Min(t + dash, len);
             var p = new Point((int)Math.Round(a.X + ux * t), (int)Math.Round(a.Y + uy * t));
             var q = new Point((int)Math.Round(a.X + ux * t2), (int)Math.Round(a.Y + uy * t2));
             Cv2.Line(m, p, q, Scalar.All(value), 1);

@@ -168,6 +168,24 @@ public class TrailRemoverTests
         Assert.True(streakAfter < streakBefore * 0.05, $"mean diff along streak {streakBefore:F3} -> {streakAfter:F3}");
     }
 
+    [Theory][InlineData(45)][InlineData(30)]
+    public void RemovesDiagonalBlinkingTrailAtProductionScale(double angleDeg)
+    {
+        // 7728 px long side (detection scale 1/3.864). 30 px dashes and 30 px gaps: at 30-45 deg each dash is a
+        // small, near-square blob at detection scale and must not be mistaken for a star.
+        var frames = SyntheticSky.Make(5, 7728, 1400, 1500, 0.03, seed: 9, landscape: false);
+        double t = angleDeg * Math.PI / 180;
+        var a = new Point(1000, 100); var b = new Point((int)Math.Round(1000 + 1200 / Math.Tan(t)), 1300);
+        using var noStreak = frames[2].Clone();
+        SyntheticSky.DrawStreak(frames[2], a, b, 0.8, dashed: true, dash: 30, gap: 30);
+        using var r = TrailRemover.Clean(frames[2], new[] { frames[0], frames[1], frames[3], frames[4] }, new TrailSettings());
+        double before = TestMasks.MeanAbsDiffAlong(frames[2], noStreak, (a.X, a.Y), (b.X, b.Y));
+        double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, noStreak, (a.X, a.Y), (b.X, b.Y));
+        DisposeAll(frames);
+        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 10);
+        Assert.True(after < before * 0.05, $"mean diff along dashes {before:F4} -> {after:F4}");
+    }
+
     [Fact] public void NoDetectionsReturnsUnchangedClone()
     {
         var frames = SyntheticSky.Make(5, 1200, 800, 600, 0.0, seed: 3);
