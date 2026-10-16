@@ -124,12 +124,12 @@ public class AccumulatorTests(ITestOutputHelper output)
       int head = 20 + 49;
       Assert.Equal(peak, Excess(r, head), 4);                    // newest position = star value
       Assert.True(Excess(r, head - 40) < 0.05f * peak);          // 40 frames back: < 5 %
-      // Position 0 (frame 0) is part of the initial background and carries no tail, so check from position 1.
+      // The background is star-free, so position 0 (frame 0) carries a tail too; the monotonic check starts at position 1.
       for (int x = 21; x < head; x++)
           Assert.True(Excess(r, x) < Excess(r, x + 1), $"tail not increasing toward head at x={x}"); }
 
     [Fact] public void CometStrengthControlsTailLength()
-    { // N = 20; position 0 is lost to the initial background, so "back" is measured to position 1 (18 frames back).
+    { // N = 20; "back" is measured to position 1 (18 frames back), as when frame 0 did not carry a tail.
       var (weak, peak) = RunMovingStar(20, 0.0);                 // T = 20, d ~ 0.794
       using var _w = weak;
       Assert.True(Excess(weak, 20 + 19 - 18) >= 0.01f * peak);

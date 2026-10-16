@@ -17,7 +17,7 @@ public static class SkyAligner
     /// (<see cref="Cv2.EstimateAffinePartial2D"/>, threshold 1.5 detection px). Null when fewer than 20 inliers remain or
     /// the fitted scale leaves 0.995..1.005. <paramref name="scale"/> = full-res px per detection px. The caller owns the result.
     /// </summary>
-    public static Mat? Estimate(IReadOnlyList<Star> from, IReadOnlyList<Star> to, double maxShiftDetectPx, double scale)
+    internal static Mat? Estimate(IReadOnlyList<Star> from, IReadOnlyList<Star> to, double maxShiftDetectPx, double scale)
     {
         var fit = FitSimilarity(from, to, maxShiftDetectPx, scale);
         if (fit is null) return null;
@@ -28,7 +28,7 @@ public static class SkyAligner
 
     /// <summary>
     /// <see cref="Estimate"/> refined for lens distortion: a cubic polynomial correction on top of the similarity, fitted
-    /// to the RANSAC inliers in both directions. Falls back to the similarity alone when too few inliers support it or the
+    /// in both directions to the matches within 2.5 detection px of the similarity (one robust re-weighting pass). Falls back to the similarity alone when too few inliers support it or the
     /// fit is ill-conditioned. Null when <see cref="Estimate"/> is.
     /// </summary>
     public static SkyWarp? EstimateWarp(IReadOnlyList<Star> from, IReadOnlyList<Star> to, double maxShiftDetectPx, double scale)
@@ -123,7 +123,7 @@ public static class SkyAligner
         if (Cv2.CountNonZero(inliers) < MinInliers || s < MinScale || s > MaxScale) return null;
         var a = new double[6];
         for (int r = 0; r < 2; r++) for (int c = 0; c < 3; c++) a[3 * r + c] = m.At<double>(r, c);
-        // Candidates for the distortion fit: every match within 4 detection px of the similarity. The RANSAC inliers alone
+        // Candidates for the distortion fit: every match within 2.5 detection px of the similarity. The RANSAC inliers alone
         // (1.5 px) would leave out exactly the frame edges, where the lens distortion is; the robust pass trims the rest.
         double tol = PolyCandidateDistance * scale;
         var kept = pairs.Where(p => Sq(p.Cur.X - (a[0] * p.Prev.X + a[1] * p.Prev.Y + a[2])) + Sq(p.Cur.Y - (a[3] * p.Prev.X + a[4] * p.Prev.Y + a[5])) <= tol * tol)

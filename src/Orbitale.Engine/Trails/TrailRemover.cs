@@ -43,7 +43,7 @@ public static class TrailRemover
     const int RepairTile = 32;              // aligned repair tiles, detection px
 
     /// <summary>Cleans <paramref name="frame"/> against unaligned neighbours (the prototype's behaviour).</summary>
-    public static TrailCleanResult Clean(Mat frame, IReadOnlyList<Mat> neighbours, TrailSettings s)
+    internal static TrailCleanResult Clean(Mat frame, IReadOnlyList<Mat> neighbours, TrailSettings s)
     {
         ArgumentNullException.ThrowIfNull(neighbours);
         return Clean(frame, neighbours.Select(n => new AlignedNeighbour(n, null)).ToList(), s, null, distinctLines: false);
@@ -160,7 +160,7 @@ public static class TrailRemover
     }
 
     /// <summary>
-    /// Detection residual = per-pixel min(frame − dilate(static median, 7), frame − dilate(aligned median, 3)), i.e. light
+    /// Detection residual = per-pixel min(frame − dilate(static median, 7), frame − dilate(aligned median, 5)), i.e. light
     /// that is new against both references, then the prototype's pipeline.
     /// </summary>
     static TrailDetection DetectAligned(Mat frameGray, Mat staticGray, Mat alignedGray, TrailSettings s)

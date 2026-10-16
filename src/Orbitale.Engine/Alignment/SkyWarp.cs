@@ -14,7 +14,7 @@ public sealed class SkyWarp
     SkyWarp(Step[] steps) => _steps = steps;
 
     /// <summary>A pure similarity/affine warp from a 2×3 CV_64FC1 matrix (forward: from → to).</summary>
-    public static SkyWarp FromAffine(Mat affine)
+    internal static SkyWarp FromAffine(Mat affine)
     {
         ArgumentNullException.ThrowIfNull(affine);
         var a = new double[6];
