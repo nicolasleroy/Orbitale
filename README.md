@@ -13,12 +13,12 @@ Orbitale is a Windows 11 app that stacks a night-sky frame sequence into a star-
 
 ## Features
 
-- **Trail removal.** Each frame is aligned against its neighbours, with the sky rotated into place and lens distortion corrected. Anything new and line-shaped (a plane or satellite) is repaired with the real sky from those neighbours.
+- **Trail removal.** For each frame, the sky of its neighbouring frames is rotated into place, with lens distortion corrected. Anything new and line-shaped (a plane or satellite) is repaired with the real sky from those neighbours. This sky alignment only serves to find and repair trails: the stack itself is not aligned (a fixed tripod is assumed), so the stars still draw their trails.
 - **Blend modes.** Lighten, Darken or Average.
 - **Comet style.** A strength setting, and the head of the comet can be at the start or at the end of the trails.
 - **Gap filling.** A strength setting.
 - **Frame list.** Frames can be removed from the list before a run.
-- **Remembered settings.** Your settings are kept between sessions.
+- **Remembered settings and folders.** Your settings are kept between sessions. The frame pickers open in the folder you last added frames from, and the save dialog in the folder you last saved to.
 
 ## Building
 
@@ -57,7 +57,7 @@ dotnet run --project tools/Orbitale.Cli -c Release -- <inputDir> <output.tif|.jp
 | `--limit N` | Only use the first N frames |
 | `--segments out.csv` | Write the removed trail segments (full-resolution pixels) to a CSV file |
 
-Besides the output file, it writes a `_preview.jpg` next to it. Ctrl+C stops the run and saves what has been stacked so far.
+Besides the output file, it writes a `_preview.jpg` next to it. The summary also counts the frames where sky alignment failed and trail removal was skipped. Ctrl+C stops the run and saves what has been stacked so far.
 
 ## Tests
 
@@ -89,3 +89,5 @@ Stop reacts in about 0.5 to 0.9 s, occasionally up to about 1.3 s in the first f
 - A full run takes several minutes on a fast PC.
 - 16-bit TIFF saves of 40 MP images take 10 to 30 s.
 - EXIF from TIFF inputs isn't carried over. Only JPG first frames carry camera, lens and date into the output.
+- Trail removal is skipped on frames where the sky can't be aligned with any neighbour (clouds, too few stars, a long lens or a long interval between frames). A notice appears the first time, and the final status gives the number of frames skipped. Frames whose long side is 2000 px or less still use the unaligned detection.
+- Trail removal is off with fewer than 3 frames.
