@@ -93,6 +93,7 @@ Console.WriteLine();
 Console.WriteLine($"{(result.Completed ? "completed" : "stopped")}: {result.FramesProcessed}/{seq.Files.Count} frames," +
                   $" run {runTime.TotalSeconds:F1} s ({runTime.TotalMilliseconds / Math.Max(1, result.FramesProcessed):F0} ms/frame), " +
                   $"total incl. save {total.TotalSeconds:F1} s, segments/frame: {(double)trailsTotal / Math.Max(1, result.FramesProcessed):F1}");
+Console.WriteLine($"alignment failed (trail removal skipped): {result.TrailRemovalSkipped} frames");
 if (timings.Count > 0)
 {
     void Stage(string name, Func<FrameTimings, double> f)

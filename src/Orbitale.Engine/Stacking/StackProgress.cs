@@ -8,6 +8,8 @@ namespace Orbitale.Engine.Stacking;
 /// <see cref="Processed"/> counts frames done in this run (1..<see cref="Total"/>), <see cref="FileIndex"/> is the frame's
 /// index in <see cref="Frames.FrameSequence.Files"/>. <see cref="RemovedTrailsPreviewCoords"/> are this frame's removed
 /// trails in <see cref="Preview"/> pixel coordinates. <see cref="Notice"/> is a one-off message for the user, or null.
+/// <see cref="TrailRemovalSkipped"/> counts the frames so far whose trail removal was skipped because no neighbour's sky
+/// could be aligned (see <see cref="StackResult.TrailRemovalSkipped"/>).
 /// </summary>
 public sealed record StackProgress(
     int FileIndex,
@@ -18,4 +20,5 @@ public sealed record StackProgress(
     TimeSpan? Eta,
     PreviewImage Preview,
     IReadOnlyList<LineSegment> RemovedTrailsPreviewCoords,
-    string? Notice);
+    string? Notice,
+    int TrailRemovalSkipped = 0);

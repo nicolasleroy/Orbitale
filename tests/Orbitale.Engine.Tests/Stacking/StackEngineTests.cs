@@ -116,6 +116,55 @@ public class StackEngineTests(ITestOutputHelper output)
         Assert.Null(reports[1].Notice);
     }
 
+    [Fact] public async Task DownscaledFramesWhoseSkyCannotBeAlignedSkipTrailRemovalWithANotice()
+    {
+        // Noise-only frames above the detection scale (no stars: no neighbour aligns) and a bright streak on one of them.
+        // The unaligned fallback was measured unfit at 40 MP, so trail removal must leave every frame as it is.
+        const int w = 2400, h = 1600, n = 5;
+        var rng = new Random(11);
+        var frames = new List<Mat>();
+        for (int f = 0; f < n; f++)
+        {
+            var m = new Mat(h, w, MatType.CV_32FC3, Scalar.All(0.1));
+            using var noise = new Mat(h, w, MatType.CV_32FC3);
+            Cv2.Randn(noise, Scalar.All(0), Scalar.All(0.01 + 0.001 * rng.Next(3)));
+            Cv2.Add(m, noise, m);
+            frames.Add(m);
+        }
+        Cv2.Line(frames[2], new Point(100, 200), new Point(2200, 1300), Scalar.All(0.9), 3);
+        var seq = FrameSequence.Build(SyntheticFiles(frames));
+
+        var reports = new List<StackProgress>();
+        using var on = await new StackEngine().RunAsync(seq, new StackSettings(), new SyncProgress<StackProgress>(reports.Add), default);
+        using var off = await new StackEngine().RunAsync(seq, new StackSettings(RemoveTrails: false), new SyncProgress<StackProgress>(_ => { }), default);
+
+        Assert.All(reports, p => Assert.Equal(0, p.TrailsInFrame));
+        Assert.Equal(0, reports[^1].TrailsTotal);
+        Assert.Equal(0, Cv2.Norm(off.Image, on.Image, NormTypes.INF));   // no frame was touched by trail removal
+        Assert.Equal(n, on.TrailRemovalSkipped);
+        Assert.Equal(n, reports[^1].TrailRemovalSkipped);
+        var notices = reports.Select(p => p.Notice).Where(x => x is not null).ToList();
+        Assert.Single(notices);   // once per run, when it first happens
+        Assert.Contains("sky alignment failed", notices[0]);
+        Assert.NotNull(reports[0].Notice);
+    }
+
+    [Fact] public async Task FramesAtDetectionScaleKeepTheUnalignedFallback()
+    {
+        // At or below 2000 px (the prototype's validated regime) a frame without alignment is still cleaned unaligned.
+        var files = SyntheticFiles(5);
+        using (var m = ImageReader.Read(files[2]))
+        {
+            Cv2.Line(m, new Point(10, 30), new Point(310, 200), Scalar.All(0.9), 2);
+            ImageWriter.Save(m, files[2], new ImageMetadata());
+        }
+        var reports = new List<StackProgress>();
+        using var r = await new StackEngine().RunAsync(FrameSequence.Build(files), new StackSettings(), new SyncProgress<StackProgress>(reports.Add), default);
+        Assert.True(reports[^1].TrailsTotal > 0);
+        Assert.Equal(0, r.TrailRemovalSkipped);
+        Assert.All(reports, p => Assert.Null(p.Notice));
+    }
+
     [Fact] public async Task HeadAtStartProcessesInReverse()
     {
         var seq = FrameSequence.Build(SyntheticFiles(8)); var reports = new List<StackProgress>();

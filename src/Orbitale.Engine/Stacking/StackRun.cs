@@ -13,6 +13,8 @@ namespace Orbitale.Engine.Stacking;
 internal sealed class StackRun
 {
     internal const string TooFewFramesNotice = "Trail removal needs at least 3 frames — turned off";
+    internal const string AlignmentFailedNotice =
+        "Trail removal skipped on {0}: sky alignment failed (clouds or too few stars). Such frames are counted in the final status";
 
     readonly FrameSequence _seq;
     readonly StackSettings _s;
@@ -36,10 +38,11 @@ internal sealed class StackRun
     readonly Dictionary<int, Task<(Mat Detection, IReadOnlyList<Star> Stars)>> _pendingAlign = new();   // started early, see StartAlignStars
     readonly Dictionary<(int Lo, int Hi), SkyWarp?> _skyMotion = new();
     readonly double _detScale;
+    readonly bool _downscaled;       // detection works on a downscaled copy (long side over DetectionScale.LongSide)
 
     IReadOnlyList<Star>? _prevStars;
     int _prevIndex = -1;             // file index of _prevStars
-    int _processed, _trailsTotal;
+    int _processed, _trailsTotal, _trailRemovalSkipped;
     PreviewImage? _lastPreview;
 
     public StackRun(FrameSequence seq, StackSettings s, IProgress<StackProgress> progress, CancellationToken ct, Action<FrameTimings>? timings)
@@ -56,6 +59,7 @@ internal sealed class StackRun
         _k = s.RemoveTrails ? NeighbourWindow.EffectiveK(_n, s.NeighbourK) : 0;
         var det = DetectionScale.For(new Size(seq.Width, seq.Height));
         _detScale = (double)Math.Max(seq.Width, seq.Height) / Math.Max(det.Width, det.Height);
+        _downscaled = det != new Size(seq.Width, seq.Height);
     }
 
     public StackResult Run()
@@ -94,7 +98,7 @@ internal sealed class StackRun
         try
         {
             var image = acc.Count > 0 ? acc.Current.Clone() : new Mat(_seq.Height, _seq.Width, MatType.CV_32FC3, Scalar.All(0));
-            return new StackResult(image, completed, _processed, metadata);
+            return new StackResult(image, completed, _processed, metadata, _trailRemovalSkipped);
         }
         finally
         {
@@ -147,8 +151,9 @@ internal sealed class StackRun
         long t1 = Stopwatch.GetTimestamp();
 
         // 2. Sky alignment of each neighbour into this frame, then trail removal. Owned: the cleaned frame,
-        // or a copy when gap filling will draw on it.
-        Mat work;
+        // or a copy when gap filling will draw on it. When no neighbour aligns on a downscaled frame, trail removal is
+        // skipped: the unaligned detection was validated at detection scale only and chops star trails at full resolution.
+        Mat? work = null;
         IReadOnlyList<LineSegment> segments = [];
         long t1b = t1;
         if (neighbours.Count >= TemporalMedian.MinFrames)
@@ -158,9 +163,13 @@ internal sealed class StackRun
             t1b = Stopwatch.GetTimestamp();
             try
             {
-                var clean = TrailRemover.Clean(frame, aligned, _trailSettings, _alignStars.TryGetValue(i, out var self) ? self.Detection : null);
-                work = clean.Cleaned;
-                segments = clean.Segments;
+                if (_downscaled && aligned.All(a => a.ToCurrent is null)) SkipTrailRemoval(i);
+                else
+                {
+                    var clean = TrailRemover.Clean(frame, aligned, _trailSettings, _alignStars.TryGetValue(i, out var self) ? self.Detection : null);
+                    work = clean.Cleaned;
+                    segments = clean.Segments;
+                }
             }
             finally
             {
@@ -168,7 +177,7 @@ internal sealed class StackRun
             }
             StartAlignStars(p, window);
         }
-        else work = _gapFiller is not null ? frame.Clone() : frame;
+        work ??= _gapFiller is not null ? frame.Clone() : frame;
         bool owned = !ReferenceEquals(work, frame);
         try
         {
@@ -192,7 +201,7 @@ internal sealed class StackRun
             long t4 = Stopwatch.GetTimestamp();
             if (owned) { work.Dispose(); owned = false; }
 
-            // 5. Preview (Current is read once: the comet recomputes it on every read).
+            // 5. Preview.
             _processed++;
             _trailsTotal += segments.Count;
             var preview = Preview.Render(acc.Current, _s.PreviewMaxLongSide);
@@ -206,6 +215,13 @@ internal sealed class StackRun
         {
             if (owned) work.Dispose();
         }
+    }
+
+    /// <summary>Counts a frame left unchanged because no neighbour aligned; the first one of the run raises the notice.</summary>
+    void SkipTrailRemoval(int i)
+    {
+        if (_trailRemovalSkipped++ == 0)
+            _notices.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, AlignmentFailedNotice, Path.GetFileName(_seq.Files[i])));
     }
 
     /// <summary>
@@ -354,7 +370,7 @@ internal sealed class StackRun
         var eta = TimeSpan.FromTicks(clock.Elapsed.Ticks / _processed * (_n - _processed));
         string? notice = _notices.Count > 0 ? string.Join("\n", _notices) : null;
         _notices.Clear();
-        _progress.Report(new StackProgress(fileIndex, _processed, _n, segments.Count, _trailsTotal, eta, preview, mapped, notice));
+        _progress.Report(new StackProgress(fileIndex, _processed, _n, segments.Count, _trailsTotal, eta, preview, mapped, notice, _trailRemovalSkipped));
     }
 
     static double Ms(long from, long to) => Stopwatch.GetElapsedTime(from, to).TotalMilliseconds;
