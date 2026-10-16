@@ -11,10 +11,11 @@ public static class SyntheticSky
 
     /// <summary>
     /// <paramref name="n"/> frames of <paramref name="stars"/> Gaussian-PSF stars rotating by
-    /// <paramref name="degPerFrame"/> about (w/2, -h/4), each trailed over its frame's exposure, noise-free.
+    /// <paramref name="degPerFrame"/> about (w/2, -h/4), each trailed over its frame's exposure, plus seeded Gaussian
+    /// sensor noise of <paramref name="noise"/> (independent per frame and channel; 0 = noise-free).
     /// With <paramref name="landscape"/>, the bottom 25 % is a static dark band with a jagged ridge that hides the stars behind it.
     /// </summary>
-    public static List<Mat> Make(int n, int w, int h, int stars, double degPerFrame, int seed, bool landscape = true)
+    public static List<Mat> Make(int n, int w, int h, int stars, double degPerFrame, int seed, bool landscape = true, double noise = 0.003)
     {
         var rng = new Random(seed);
         double cx = w / 2.0, cy = -h / 4.0;
@@ -46,6 +47,13 @@ public static class SyntheticSky
             var frame = new Mat();
             Cv2.Merge(new[] { gray, gray, gray }, frame);
             gray.Dispose();
+            if (noise > 0)
+            {
+                using var nz = new Mat(h, w, MatType.CV_32FC3);
+                Cv2.SetTheRNG((ulong)seed * 1000UL + (ulong)f + 1UL);   // thread-local RNG: deterministic per frame
+                Cv2.Randn(nz, Scalar.All(0), Scalar.All(noise));
+                Cv2.Add(frame, nz, frame);
+            }
             frames.Add(frame);
         }
         return frames;
@@ -86,6 +94,16 @@ public static class SyntheticSky
         var mask = new Mat(h, w, MatType.CV_8UC1, Scalar.All(0));
         Cv2.FillPoly(mask, new[] { pts }, Scalar.All(255));
         return mask;
+    }
+
+    /// <summary>Adds a Gaussian star of peak <paramref name="amp"/> and PSF sigma <paramref name="sig"/> at (x, y), to every channel.</summary>
+    public static void DrawStar(Mat m, double x, double y, double amp, double sig)
+    {
+        if (m.Channels() == 1) { Splat(m, x, y, amp, sig); return; }
+        var planes = m.Split();
+        foreach (var p in planes) Splat(p, x, y, amp, sig);
+        Cv2.Merge(planes, m);
+        foreach (var p in planes) p.Dispose();
     }
 
     static void Splat(Mat gray, double x, double y, double amp, double sig)

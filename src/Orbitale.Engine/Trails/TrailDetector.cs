@@ -24,7 +24,7 @@ public sealed record TrailDetection(Mat Mask8U, IReadOnlyList<LineSegment> Segme
 public static class TrailDetector
 {
     const int StarDilate = 7;       // px, must exceed star drift between frames
-    const int MinBlob = 4;          // drop residual blobs smaller than this (px)
+    internal const int MinBlob = 4; // drop residual blobs smaller than this (px)
     const double MinLength = 0.03;  // fraction of the long side
     const int MaxGap = 25;          // px gap allowed in dashed (blinking) trails
     const double MinFill = 0.35;    // fraction of a segment that must be lit
@@ -49,28 +49,27 @@ public static class TrailDetector
         // OpenCvSharp already returns one entry per segment, so the prototype's reshape(-1, 4) is implicit.
         var lines = Cv2.HoughLinesP(binary, 1, Math.PI / 720, Math.Max(20, minLen / 2), minLen, MaxGap);
 
-        var mask = new Mat(h, w, MatType.CV_8UC1, Scalar.All(0));
-        try
+        var kept = new List<LineSegment>();
+        foreach (var l in lines)
         {
-            var kept = new List<LineSegment>();
-            foreach (var l in lines)
-            {
-                if (Fill(binary, l.P1.X, l.P1.Y, l.P2.X, l.P2.Y) is double fill && fill < MinFill) continue;
-                kept.Add(new LineSegment(l.P1.X, l.P1.Y, l.P2.X, l.P2.Y));
-                Cv2.Line(mask, l.P1, l.P2, Scalar.All(255), LineWidth);
-            }
-            if (kept.Count > 0)
-            {
-                using var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(MaskDilate, MaskDilate));
-                Cv2.Dilate(mask, mask, k);
-            }
-            return new TrailDetection(mask, kept);
+            if (Fill(binary, l.P1.X, l.P1.Y, l.P2.X, l.P2.Y) is double fill && fill < MinFill) continue;
+            kept.Add(new LineSegment(l.P1.X, l.P1.Y, l.P2.X, l.P2.Y));
         }
-        catch
+        return new TrailDetection(DrawMask(binary.Size(), kept), kept);
+    }
+
+    /// <summary>The prototype's mask: width-7 lines, then a 5 px ellipse dilate when any segment is kept.</summary>
+    internal static Mat DrawMask(Size size, IReadOnlyList<LineSegment> segments)
+    {
+        var mask = new Mat(size, MatType.CV_8UC1, Scalar.All(0));
+        foreach (var g in segments)
+            Cv2.Line(mask, new Point((int)g.X1, (int)g.Y1), new Point((int)g.X2, (int)g.Y2), Scalar.All(255), LineWidth);
+        if (segments.Count > 0)
         {
-            mask.Dispose();
-            throw;
+            using var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(MaskDilate, MaskDilate));
+            Cv2.Dilate(mask, mask, k);
         }
+        return mask;
     }
 
     /// <summary>Star-tolerant residual, 3×3 blur, then a robust (median + σ·MAD) threshold. Returns 0/255 CV_8UC1.</summary>
@@ -86,17 +85,27 @@ public static class TrailDetector
         }
         Cv2.GaussianBlur(residual, residual, new Size(3, 3), 0);
 
-        var values = new float[residual.Rows * residual.Cols];
-        Marshal.Copy(residual.Data, values, 0, values.Length); // fresh Mat from Subtract: continuous
-        float med = Median(values);
-        for (int i = 0; i < values.Length; i++) values[i] = MathF.Abs(values[i] - med);
-        // float32 arithmetic, as numpy does on the prototype's float32 residual.
-        float mad = Median(values) * 1.4826f + 1e-6f;
-        float threshold = med + (float)sigma * mad;
+        float threshold = RobustThreshold(residual, sigma);
 
         var binary = new Mat();
         Cv2.Compare(residual, Scalar.All(threshold), binary, CmpTypes.GT);
         return binary;
+    }
+
+    /// <summary>
+    /// The prototype's adaptive threshold: median + σ·MAD·1.4826 (+1e-6), in float32 arithmetic as numpy
+    /// does on a float32 residual. <paramref name="residual"/> must be a continuous CV_32FC1 Mat.
+    /// </summary>
+    internal static float RobustThreshold(Mat residual, double sigma)
+    {
+        if (residual.Type() != MatType.CV_32FC1 || !residual.IsContinuous())
+            throw new ArgumentException("Residual must be a continuous CV_32FC1 Mat.", nameof(residual));
+        var values = new float[residual.Rows * residual.Cols];
+        Marshal.Copy(residual.Data, values, 0, values.Length);
+        float med = Median(values);
+        for (int i = 0; i < values.Length; i++) values[i] = MathF.Abs(values[i] - med);
+        float mad = Median(values) * 1.4826f + 1e-6f;
+        return med + (float)sigma * mad;
     }
 
     /// <summary>Removes 8-connected components smaller than <see cref="MinBlob"/> (moved stars, hot pixels).</summary>
