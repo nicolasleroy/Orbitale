@@ -24,6 +24,15 @@
     <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Unpackaged WinUI: dotnet publish leaves out the compiled XAML (.xbf) and Orbitale.pri, so the published app
+       would crash at startup with a XamlParseException. Add them to the publish set. -->
+  <Target Name="IncludeXamlInPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_XamlPublish Include="$(OutDir)**\*.xbf;$(OutDir)Orbitale.pri" Exclude="$(OutDir)publish\**" />
+      <ResolvedFileToPublish Include="@(_XamlPublish)" RelativePath="$([MSBuild]::MakeRelative('$(OutDir)', '%(_XamlPublish.FullPath)'))" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
