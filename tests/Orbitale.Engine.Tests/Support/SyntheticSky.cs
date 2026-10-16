@@ -27,22 +27,24 @@ public static class SyntheticSky
     /// <see cref="Make"/>; smaller values leave a gap between consecutive images of a star).
     /// </summary>
     public static Sky Generate(int n, int w, int h, int stars, double degPerFrame, int seed, bool landscape = true,
-                               double noise = 0.003, double exposure = 1.0)
+                               double noise = 0.003, double exposure = 1.0, double distortionK1 = 0)
     {
         var rng = new Random(seed);
         double cx = w / 2.0, cy = -h / 4.0;
         // Star catalogue: radius/angle about the pole, amplitude (mostly faint), PSF sigma.
         var catalogue = new List<SkyStar>();
+        var lens = new Sky(0, 0, 0, 0, 0, [], null) { K1 = distortionK1, W = w, H = h };
         while (catalogue.Count < stars)
         {
-            double x = rng.NextDouble() * w, y = rng.NextDouble() * h;
+            // Uniform over the image as recorded: with distortion, the ideal position is the undistorted one.
+            var (x, y) = lens.Undistort(rng.NextDouble() * w, rng.NextDouble() * h);
             double dx = x - cx, dy = y - cy;
             double u = rng.NextDouble();
             catalogue.Add(new SkyStar(Math.Sqrt(dx * dx + dy * dy), Math.Atan2(dy, dx), 0.06 + 0.7 * u * u * u, 0.8 + 0.6 * rng.NextDouble()));
         }
 
         var land = landscape ? LandscapeMask(w, h, rng) : null;
-        var sky = new Sky(n, cx, cy, degPerFrame * Math.PI / 180.0, exposure, catalogue, land);
+        var sky = new Sky(n, cx, cy, degPerFrame * Math.PI / 180.0, exposure, catalogue, land) { K1 = distortionK1, W = w, H = h };
         for (int f = 0; f < n; f++)
         {
             var gray = new Mat(h, w, MatType.CV_32FC1, Scalar.All(Background));
@@ -51,7 +53,8 @@ public static class SyntheticSky
                 for (int k = 0; k < SubSteps; k++)
                 {
                     double t = s.A + (f - n / 2) * sky.Step + sky.Step * exposure * k / SubSteps;   // same arithmetic as before `exposure`
-                    Splat(gray, cx + s.R * Math.Cos(t), cy + s.R * Math.Sin(t), s.Amp / SubSteps, s.Sigma);
+                    var (px, py) = sky.Distort(cx + s.R * Math.Cos(t), cy + s.R * Math.Sin(t));
+                    Splat(gray, px, py, s.Amp / SubSteps, s.Sigma);
                 }
             if (land != null) gray.SetTo(Scalar.All(LandscapeLevel), land);
 
@@ -164,6 +167,37 @@ public sealed class Sky : IDisposable
 
     /// <summary>Brightness-weighted centre of the star's image in frame <paramref name="f"/> (mean of the exposure sub-steps).</summary>
     public (double X, double Y) Centre(SkyStar s, double f) => Position(s, f, 2.5 / 6);
+
+    /// <summary>Lens radial distortion k1 relative to the half-diagonal (0 = none), applied to the star positions.</summary>
+    public double K1 { get; init; }
+    public int W { get; init; }
+    public int H { get; init; }
+
+    /// <summary>Ideal (undistorted) position → image position: c + (p − c)(1 + k1·r²/R²), c = image centre, R = half-diagonal.</summary>
+    public (double X, double Y) Distort(double x, double y)
+    {
+        if (K1 == 0) return (x, y);
+        double cx = W / 2.0, cy = H / 2.0, r2 = ((x - cx) * (x - cx) + (y - cy) * (y - cy)) / (cx * cx + cy * cy);
+        double f = 1 + K1 * r2;
+        return (cx + (x - cx) * f, cy + (y - cy) * f);
+    }
+
+    /// <summary>Inverse of <see cref="Distort"/> (fixed-point iteration).</summary>
+    public (double X, double Y) Undistort(double x, double y)
+    {
+        if (K1 == 0) return (x, y);
+        double ux = x, uy = y;
+        for (int i = 0; i < 50; i++) { var (dx, dy) = Distort(ux, uy); ux += x - dx; uy += y - dy; }
+        return (ux, uy);
+    }
+
+    /// <summary>True image motion of a sky point from frame <paramref name="from"/> to <paramref name="to"/>, distortion included.</summary>
+    public (double X, double Y) Move(double x, double y, int from, int to)
+    {
+        var (ux, uy) = Undistort(x, y);
+        var (rx, ry) = Rotate(ux, uy, from, to);
+        return Distort(rx, ry);
+    }
 
     /// <summary>True sky motion from frame <paramref name="from"/> to frame <paramref name="to"/>: the rotation about the pole by (to − from)·Step.</summary>
     public (double X, double Y) Rotate(double x, double y, int from, int to)

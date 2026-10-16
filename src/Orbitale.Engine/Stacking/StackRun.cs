@@ -29,12 +29,12 @@ internal sealed class StackRun
     readonly List<string> _notices = new();
 
     // Sky alignment: per file index the detection-scale copy of the frame (owned) and its brightest stars (raw frame, no
-    // exclude mask), and the sky motion per index pair (lo, hi) as the 2x3 affine lo -> hi (null = no reliable estimate).
+    // exclude mask), and the sky motion per index pair (lo, hi) as the warp lo -> hi (null = no reliable estimate).
     // All keep only what the current and next frame need.
     const int AlignStarsMax = 4000;  // brightest stars used for alignment: plenty for RANSAC, cheaper and less ambiguous matching
     readonly Dictionary<int, (Mat Detection, IReadOnlyList<Star> Stars)> _alignStars = new();
     readonly Dictionary<int, Task<(Mat Detection, IReadOnlyList<Star> Stars)>> _pendingAlign = new();   // started early, see StartAlignStars
-    readonly Dictionary<(int Lo, int Hi), double[]?> _skyMotion = new();
+    readonly Dictionary<(int Lo, int Hi), SkyWarp?> _skyMotion = new();
     readonly double _detScale;
 
     IReadOnlyList<Star>? _prevStars;
@@ -117,7 +117,7 @@ internal sealed class StackRun
         PrefetchNext(p, i, neighbourIdx, window);
         long t1 = Stopwatch.GetTimestamp();
 
-        // 2. Sky alignment of each neighbour into this frame, then trail removal. Owned: the affines; the cleaned frame,
+        // 2. Sky alignment of each neighbour into this frame, then trail removal. Owned: the cleaned frame,
         // or a copy when gap filling will draw on it.
         Mat work;
         IReadOnlyList<LineSegment> segments = [];
@@ -135,7 +135,6 @@ internal sealed class StackRun
             }
             finally
             {
-                foreach (var a in aligned) a.ToCurrent?.Dispose();
                 ForgetSkyMotionOutside(p, i, neighbourIdx);
             }
             StartAlignStars(p, window);
@@ -180,59 +179,38 @@ internal sealed class StackRun
     }
 
     /// <summary>
-    /// The sky motion from file <paramref name="j"/> into file <paramref name="i"/> as a new 2×3 CV_64FC1 affine (owned by
-    /// the caller), or null when it cannot be estimated. Each index pair is estimated once, lower index to higher, and
-    /// inverted for the other direction, so the result does not depend on the processing order.
+    /// The sky motion from file <paramref name="j"/> into file <paramref name="i"/>, or null when it cannot be estimated.
+    /// Each index pair is estimated once, lower index to higher, and inverted for the other direction, so the result does
+    /// not depend on the processing order.
     /// </summary>
-    Mat? SkyMotion(int j, int i, FrameWindow window)
+    SkyWarp? SkyMotion(int j, int i, FrameWindow window)
     {
         var lohi = PairMotion(Math.Min(i, j), Math.Max(i, j), window);
-        if (lohi is null) return null;
-        var result = new Mat(2, 3, MatType.CV_64FC1);
-        for (int r = 0; r < 2; r++) for (int c = 0; c < 3; c++) result.Set(r, c, lohi[3 * r + c]);
-        if (j < i) return result;
-        using (result)
-        {
-            var inverse = new Mat();
-            Cv2.InvertAffineTransform(result, inverse);
-            return inverse;
-        }
+        return lohi is null ? null : j < i ? lohi : lohi.Inverse();
     }
 
     /// <summary>
-    /// The affine lo → hi (row-major 2×3), cached. Estimated directly from the two frames' stars; when that fails over a
-    /// gap of more than one frame (the matching radius grows with the gap, and dense star fields then fail the ratio
-    /// test), it is chained from the frame-to-frame motions lo → lo+1 → … → hi.
+    /// The warp lo → hi, cached. Estimated directly from the two frames' stars (polynomial when the stars support it).
+    /// Over a gap of more than one frame, when the direct estimate fails or falls back to a plain similarity (the matching
+    /// radius grows with the gap, and dense star fields then fail the ratio test), the frame-to-frame warps
+    /// lo → lo+1 → … → hi are chained instead if they all exist and at least one carries the distortion correction.
     /// </summary>
-    double[]? PairMotion(int lo, int hi, FrameWindow window)
+    SkyWarp? PairMotion(int lo, int hi, FrameWindow window)
     {
         if (_skyMotion.TryGetValue((lo, hi), out var cached)) return cached;
-        double[]? result = null;
+        SkyWarp? result = null;
         if (AlignStars(lo, window) is { } a && AlignStars(hi, window) is { } b)
+            result = SkyAligner.EstimateWarp(a, b, 6 + 12 * (hi - lo), _detScale);
+        if ((result is null || !result.IsPolynomial) && hi - lo > 1)
         {
-            using var m = SkyAligner.Estimate(a, b, 6 + 12 * (hi - lo), _detScale);
-            if (m is not null)
-            {
-                result = new double[6];
-                for (int r = 0; r < 2; r++) for (int c = 0; c < 3; c++) result[3 * r + c] = m.At<double>(r, c);
-            }
-        }
-        if (result is null && hi - lo > 1)
-        {
-            result = [1, 0, 0, 0, 1, 0];
-            for (int t = lo; t < hi && result is not null; t++)
-                result = PairMotion(t, t + 1, window) is { } step ? Compose(step, result) : null;
+            SkyWarp? chain = PairMotion(lo, lo + 1, window);
+            for (int t = lo + 1; t < hi && chain is not null; t++)
+                chain = PairMotion(t, t + 1, window) is { } step ? chain.Then(step) : null;
+            if (chain is not null && (result is null || chain.IsPolynomial)) result = chain;
         }
         _skyMotion[(lo, hi)] = result;
         return result;
     }
-
-    /// <summary>Second ∘ first for 2×3 row-major affines (apply <paramref name="first"/>, then <paramref name="second"/>).</summary>
-    static double[] Compose(double[] second, double[] first) =>
-    [
-        second[0] * first[0] + second[1] * first[3], second[0] * first[1] + second[1] * first[4], second[0] * first[2] + second[1] * first[5] + second[2],
-        second[3] * first[0] + second[4] * first[3], second[3] * first[1] + second[4] * first[4], second[3] * first[2] + second[4] * first[5] + second[5],
-    ];
 
     /// <summary>
     /// The brightest stars of file <paramref name="index"/> for sky alignment, detected once on the raw frame (its

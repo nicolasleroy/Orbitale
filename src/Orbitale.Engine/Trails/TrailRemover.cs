@@ -1,4 +1,5 @@
 using OpenCvSharp;
+using Orbitale.Engine.Alignment;
 using Orbitale.Engine.Imaging;
 
 namespace Orbitale.Engine.Trails;
@@ -9,8 +10,8 @@ public sealed record TrailCleanResult(Mat Cleaned, IReadOnlyList<LineSegment> Se
     public void Dispose() => Cleaned.Dispose();
 }
 
-/// <summary>A neighbour frame (owned by the caller) and its sky motion into the current frame (2×3 CV_64FC1, full-res px), or null when unknown.</summary>
-public readonly record struct AlignedNeighbour(Mat Frame, Mat? ToCurrent)
+/// <summary>A neighbour frame (owned by the caller) and its sky motion into the current frame (full-res px), or null when unknown.</summary>
+public readonly record struct AlignedNeighbour(Mat Frame, SkyWarp? ToCurrent)
 {
     /// <summary>Optional <see cref="Frame"/> already area-downscaled to detection scale (CV_32FC3, owned by the caller): saves a 40 MP resize per use.</summary>
     internal Mat? Detection { get; init; }
@@ -53,7 +54,9 @@ public static class TrailRemover
     /// (<see cref="AlignedNeighbour.ToCurrent"/>). A pixel is a trail candidate only if it is new against both the static
     /// median of the neighbours (the landscape cancels) and the median of the neighbours with their sky rotated into this
     /// frame (the stars cancel). The repair takes the aligned median in the sky and the static median in the landscape.
-    /// With an alignment, pieces down to 0.01 of the long side are kept (slow planes). When no alignment is known the
+    /// With an alignment, the 0.03 minimum length is measured as a Euclidean length (OpenCV checks it per axis, which drops
+    /// short diagonals). Shorter pieces are not kept: a slow plane's per-frame piece below 0.03 of the long side is a known
+    /// miss (accepting them chopped star trails; see the Task 8b report). When no alignment is known the
     /// detection and repair are exactly the unaligned prototype port. <see cref="TrailCleanResult.Segments"/> are the
     /// distinct lines (collinear Hough pieces merged), which is what a user counts as trails.
     /// </summary>
@@ -71,8 +74,6 @@ public static class TrailRemover
         {
             if (n.Frame is null || n.Frame.Size() != frame.Size())
                 throw new ArgumentException("Neighbours must have the frame's size.", nameof(neighbours));
-            if (n.ToCurrent is { } m && (m.Type() != MatType.CV_64FC1 || m.Rows != 2 || m.Cols != 3))
-                throw new ArgumentException("ToCurrent must be a 2x3 CV_64FC1 affine.", nameof(neighbours));
         }
 
         // Owned here. In the aligned path its sky pixels under the trails become the aligned median: it is the repair source.
@@ -93,12 +94,7 @@ public static class TrailRemover
 
         // Guard against static structures (a lit road, a wire, the horizon): keep only segments that are
         // bright in this frame but not in the neighbour median(s). Detection itself stays a pure prototype port.
-        // Aligned path: short pieces (under the prototype's 0.03 of the long side) are kept only when they cross the local
-        // star motion; along it they are what star residues look like where the alignment misfits (lens distortion).
-        double longMin = TrailDetector.MinLength * Math.Max(detSize.Width, detSize.Height);
-        var transient = detection.Segments
-            .Where(g => alignedGray is null || Length(g) >= longMin || CrossesStarMotion(g, neighbours, sx, sy))
-            .Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
+        var transient = detection.Segments.Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
         if (transient.Count == 0)
             return new TrailCleanResult(frame.Clone(), []);
         using var trailMask = transient.Count == detection.Segments.Count
@@ -131,33 +127,6 @@ public static class TrailRemover
         return new TrailCleanResult(Blend(frame, median, weight), segments);
     }
 
-    const double ShortPieceMinAngle = 20;   // degrees between a short piece and the local star motion (undirected)
-    const double MotionMinPixels = 0.5;     // full-res px: below this the star motion has no direction
-
-    static double Length(LineSegment g) => Math.Sqrt((double)(g.X2 - g.X1) * (g.X2 - g.X1) + (double)(g.Y2 - g.Y1) * (g.Y2 - g.Y1));
-
-    /// <summary>
-    /// True when the piece <paramref name="g"/> (detection px) runs at least 20° (undirected lines, 0..90°) away from the
-    /// local star motion at its midpoint: the displacement of that point under the neighbour affine with the smallest
-    /// motion there (the nearest in time). False when no neighbour has an affine or the stars barely move there.
-    /// </summary>
-    static bool CrossesStarMotion(LineSegment g, IReadOnlyList<AlignedNeighbour> neighbours, double sx, double sy)
-    {
-        double mx = ((g.X1 + g.X2) / 2.0 + 0.5) * sx - 0.5, my = ((g.Y1 + g.Y2) / 2.0 + 0.5) * sy - 0.5;
-        double bestX = 0, bestY = 0, best = double.PositiveInfinity;
-        foreach (var n in neighbours)
-        {
-            if (n.ToCurrent is not { } m) continue;
-            double dx = m.At<double>(0, 0) * mx + m.At<double>(0, 1) * my + m.At<double>(0, 2) - mx;
-            double dy = m.At<double>(1, 0) * mx + m.At<double>(1, 1) * my + m.At<double>(1, 2) - my;
-            double d = Math.Sqrt(dx * dx + dy * dy);
-            if (d >= MotionMinPixels && d < best) (best, bestX, bestY) = (d, dx, dy);
-        }
-        if (double.IsPositiveInfinity(best)) return false;
-        double angle = Math.Abs(Math.Atan2((g.Y2 - g.Y1) * sy, (g.X2 - g.X1) * sx) - Math.Atan2(bestY, bestX)) * 180 / Math.PI % 180;
-        return Math.Min(angle, 180 - angle) >= ShortPieceMinAngle;
-    }
-
     /// <summary>
     /// Detection residual = per-pixel min(frame − dilate(static median, 7), frame − dilate(aligned median, 3)), i.e. light
     /// that is new against both references, then the prototype's pipeline.
@@ -167,12 +136,13 @@ public static class TrailRemover
         using var rStatic = TrailDetector.StarTolerantResidual(frameGray, staticGray, TrailDetector.StarDilate);
         using var rAligned = TrailDetector.StarTolerantResidual(frameGray, alignedGray, AlignedStarDilate);
         Cv2.Min(rStatic, rAligned, rStatic);
-        return TrailDetector.DetectResidual(rStatic, s, shortPieces: true);
+        return TrailDetector.DetectResidual(rStatic, s, euclideanLength: true);
     }
 
     /// <summary>
     /// Temporal median (CV_32FC1, detection scale) of the neighbours' gray detection-scale copies, each warped into the
-    /// current frame with its <see cref="AlignedNeighbour.ToCurrent"/> (bilinear, replicated border). Neighbours without
+    /// current frame with its <see cref="AlignedNeighbour.ToCurrent"/> (<see cref="Cv2.Remap"/>: bilinear, replicated
+    /// border). Neighbours without
     /// an alignment are used unwarped. (Median of grays rather than gray of the colour median: a third of the work, and
     /// only detection and the sky/landscape choice see it.)
     /// </summary>
@@ -189,13 +159,15 @@ public static class TrailRemover
                 warped.Add(gray);
                 outside.Add(null);
                 if (n.ToCurrent is null) continue;
-                using var m = DetectionAffine(n.ToCurrent, sx, sy);
+                using var mapX = new Mat();
+                using var mapY = new Mat();
+                n.ToCurrent.BuildMaps(detSize.Width, detSize.Height, 0, 0, sx, sy, mapX, mapY);
                 using var tmp = new Mat();
-                Cv2.WarpAffine(gray, tmp, m, detSize, InterpolationFlags.Linear, BorderTypes.Replicate);
+                Cv2.Remap(gray, tmp, mapX, mapY, InterpolationFlags.Linear, BorderTypes.Replicate);
                 tmp.CopyTo(gray);
                 using var seen = new Mat();
                 using (var ones = new Mat(detSize, MatType.CV_8UC1, Scalar.All(255)))
-                    Cv2.WarpAffine(ones, seen, m, detSize, InterpolationFlags.Nearest, BorderTypes.Constant, Scalar.All(0));
+                    Cv2.Remap(ones, seen, mapX, mapY, InterpolationFlags.Nearest, BorderTypes.Constant, Scalar.All(0));
                 var o = new Mat();
                 Cv2.Compare(seen, Scalar.All(0), o, CmpTypes.EQ);
                 outside[^1] = o;
@@ -228,22 +200,6 @@ public static class TrailRemover
             foreach (var m in warped) m.Dispose();
             foreach (var o in outside) o?.Dispose();
         }
-    }
-
-    /// <summary>
-    /// The full-resolution affine <paramref name="full"/> (p' = Ap + t) in detection px, through pixel centres
-    /// (full = S(det + h) − h, h = (½, ½), S = diag(sx, sy)): A' = S⁻¹AS, t' = S⁻¹(ASh − Ah + t + h) − h.
-    /// </summary>
-    internal static Mat DetectionAffine(Mat full, double sx, double sy)
-    {
-        double a = full.At<double>(0, 0), b = full.At<double>(0, 1), tx = full.At<double>(0, 2);
-        double c = full.At<double>(1, 0), d = full.At<double>(1, 1), ty = full.At<double>(1, 2);
-        double ux = a * 0.5 * sx + b * 0.5 * sy - (a + b) * 0.5 + tx + 0.5;
-        double uy = c * 0.5 * sx + d * 0.5 * sy - (c + d) * 0.5 + ty + 0.5;
-        var m = new Mat(2, 3, MatType.CV_64FC1);
-        m.Set(0, 0, a); m.Set(0, 1, b * sy / sx); m.Set(0, 2, ux / sx - 0.5);
-        m.Set(1, 0, c * sx / sy); m.Set(1, 1, d); m.Set(1, 2, uy / sy - 0.5);
-        return m;
     }
 
     /// <summary>
@@ -354,13 +310,13 @@ public static class TrailRemover
                     foreach (var n in neighbours)
                     {
                         if (n.ToCurrent is null) { parts.Add(new Mat(n.Frame, tile)); continue; }
-                        // dst(x) = src(M⁻¹(x + tile origin)): shift the affine's output by −origin.
-                        using var m = n.ToCurrent.Clone();
-                        m.Set(0, 2, m.At<double>(0, 2) - tile.X);
-                        m.Set(1, 2, m.At<double>(1, 2) - tile.Y);
+                        // Remap grids for this tile only (full-res px): never for a whole 40 MP frame.
+                        using var mapX = new Mat();
+                        using var mapY = new Mat();
+                        n.ToCurrent.BuildMaps(tile.Width, tile.Height, tile.X, tile.Y, 1, 1, mapX, mapY);
                         var w = new Mat();
                         parts.Add(w);
-                        Cv2.WarpAffine(n.Frame, w, m, tile.Size, InterpolationFlags.Linear, BorderTypes.Replicate);
+                        Cv2.Remap(n.Frame, w, mapX, mapY, InterpolationFlags.Linear, BorderTypes.Replicate);
                     }
                     using var alignedTile = TemporalMedian.Compute(parts);
                     for (int y = 0; y < tile.Height; y++)

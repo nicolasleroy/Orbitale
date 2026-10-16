@@ -233,18 +233,16 @@ public class TrailRemoverTests(ITestOutputHelper output)
     // (R ~ 3100 px) by 22 full-res px = 11 detection px per frame.
     static Sky FastSky(int seed, int w = 1200, int h = 800, double deg = 0.8, int stars = 600) => SyntheticSky.Generate(5, w, h, stars, deg, seed);
 
-    /// <summary>Neighbours 0, 1, 3, 4 of frame 2, each with its estimated sky motion into frame 2. The caller disposes the affines.</summary>
+    /// <summary>Neighbours 0, 1, 3, 4 of frame 2, each with its estimated sky motion into frame 2.</summary>
     static List<AlignedNeighbour> Aligned(IList<Mat> frames, int i = 2)
     {
         var size = frames[i].Size();
         double scale = (double)Math.Max(size.Width, size.Height) / Math.Max(DetectionScale.For(size).Width, DetectionScale.For(size).Height);
         var target = StarDetector.Detect(frames[i]);
         return Enumerable.Range(0, frames.Count).Where(j => j != i)
-            .Select(j => new AlignedNeighbour(frames[j], SkyAligner.Estimate(StarDetector.Detect(frames[j]), target, 6 + 12 * Math.Abs(j - i), scale)))
+            .Select(j => new AlignedNeighbour(frames[j], SkyAligner.EstimateWarp(StarDetector.Detect(frames[j]), target, 6 + 12 * Math.Abs(j - i), scale)))
             .ToList();
     }
-
-    static void DisposeAffines(IEnumerable<AlignedNeighbour> ns) { foreach (var n in ns) n.ToCurrent?.Dispose(); }
 
     [Fact] public void NoFalsePositivesWhenStarsMoveFast()
     {
@@ -254,7 +252,6 @@ public class TrailRemoverTests(ITestOutputHelper output)
         Assert.All(ns, n => Assert.NotNull(n.ToCurrent));
         using var aligned = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
         using var unaligned = TrailRemover.Clean(sky.Frames[2], ns.Select(n => n.Frame).ToList(), new TrailSettings());
-        DisposeAffines(ns);
         output.WriteLine($"segments: aligned {aligned.Segments.Count}, unaligned {unaligned.Segments.Count}");
         Assert.True(unaligned.Segments.Count > 0, "the scene must defeat the unaligned reference");
         Assert.Empty(aligned.Segments);
@@ -270,7 +267,6 @@ public class TrailRemoverTests(ITestOutputHelper output)
         SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
         var ns = Aligned(sky.Frames);
         using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
-        DisposeAffines(ns);
         double before = TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y));
         double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y));
         output.WriteLine($"{r.Segments.Count} segments, mean diff along streak {before:F4} -> {after:F4}");
@@ -299,7 +295,6 @@ public class TrailRemoverTests(ITestOutputHelper output)
         SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
         var ns = Aligned(sky.Frames);
         using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
-        DisposeAffines(ns);
         double peakAfter = r.Cleaned.At<Vec3f>(py, px).Item1 - noStar.At<Vec3f>(py, px).Item1;
         output.WriteLine($"{r.Segments.Count} segments, star peak {peakBefore:F3} -> {peakAfter:F3}");
         Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6);
@@ -315,38 +310,37 @@ public class TrailRemoverTests(ITestOutputHelper output)
         Cv2.Line(sky.Frames[2], a, b, Scalar.All(0.8), thickness);
         var ns = Aligned(sky.Frames);
         using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
-        DisposeAffines(ns);
         return (TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y)),
                 TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y)), r.Segments.ToList());
     }
 
-    [Fact] public void RemovesShortSlowPlanePieceAcrossTheStarMotion()
+    [Fact] public void ShortSlowPlanePieceIsAKnownMiss()
     {
-        // A slow plane records only a short piece per exposure: 30 detection px (dx = dy = 21 detection px), under the
-        // prototype's 0.03 x long side (60 detection px) and under OpenCV's per-axis length check for any minimum above
-        // 21. It runs at 135 deg, about 89 deg from the local star motion: short pieces that cross the motion are planes.
+        // A slow plane records only a short piece per exposure. This one is 30 detection px (dx = dy = 21), under the 0.03
+        // x long side minimum (60 detection px), across the star motion. Shorter minimums were tried on the real data and
+        // chopped star trails (Task 8b report, fix rounds 1-3), so such pieces are left in place: a known limit.
         var a = new Point(1042, 400); var b = new Point(1000, 442);
         var (before, after, segments) = CleanWithLine(35, a, b, 4);
+        output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
+        Assert.DoesNotContain(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6
+                                             && Math.Min(s.X1, s.X2) < a.X + 20 && Math.Max(s.X1, s.X2) > b.X - 20);
+        Assert.True(after > before * 0.9, $"the piece was repaired: {before:F4} -> {after:F4}");
+    }
+
+    [Fact] public void RemovesDiagonalPieceJustOverTheMinimumLength()
+    {
+        // 70 detection px at 45 deg (dx = dy = 49.5): over the 60 px minimum as a length, under it on either axis, which is
+        // all OpenCV's HoughLinesP checks. The aligned path measures the length.
+        var a = new Point(1099, 400); var b = new Point(1000, 499);
+        var (before, after, segments) = CleanWithLine(37, a, b, 4);
         output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
         Assert.Contains(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 4);
         Assert.True(after < before * 0.05, $"mean diff along the piece {before:F4} -> {after:F4}");
     }
 
-    [Fact] public void IgnoresShortLineAlongTheStarMotion()
-    {
-        // The same 30 detection px piece at 45 deg, within 1-2 deg of the local star motion: short lines along the motion
-        // are what star residues look like (misalignment at the frame edges), so they are not accepted, even when real.
-        var a = new Point(1000, 400); var b = new Point(1042, 442);
-        var (before, after, segments) = CleanWithLine(35, a, b, 4);
-        output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
-        Assert.DoesNotContain(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6
-                                             && Math.Min(s.X1, s.X2) < b.X + 20 && Math.Max(s.X1, s.X2) > a.X - 20);
-        Assert.True(after > before * 0.9, $"the piece was repaired: {before:F4} -> {after:F4}");
-    }
-
     [Fact] public void RemovesLongStreakAlongTheStarMotion()
     {
-        // 200 detection px along the local star motion: long segments are accepted whatever their direction.
+        // 200 detection px along the local star motion: a trail parallel to the stars' own trails is still removed.
         var a = new Point(855, 261); var b = new Point(1145, 539);
         var (before, after, segments) = CleanWithLine(36, a, b, 2);
         output.WriteLine($"{segments.Count} segments, mean diff along the streak {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
@@ -384,7 +378,6 @@ public class TrailRemoverTests(ITestOutputHelper output)
         SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
         var ns = Aligned(sky.Frames);
         using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
-        DisposeAffines(ns);
         Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6);
         // Ground pixels of the trail corridor (+-8 px), from the ridge down: the repair is the static median.
         double worst = 0, sum = 0; int count = 0;
@@ -411,7 +404,6 @@ public class TrailRemoverTests(ITestOutputHelper output)
         var ns = Aligned(frames);
         Assert.All(ns, n => Assert.NotNull(n.ToCurrent));
         using var r = TrailRemover.Clean(frames[2], ns, new TrailSettings(Sensitivity: sensitivity));
-        DisposeAffines(ns);
         DisposeAll(frames);
         double lineAngle = Math.Atan2(640 - 650, 1100 - 100) * 180 / Math.PI;
         Assert.DoesNotContain(r.Segments, s => TestMasks.DistanceToLine(s, (100, 650), (1100, 640)) < 10
@@ -432,24 +424,24 @@ public class TrailRemoverTests(ITestOutputHelper output)
         Assert.Equal(0.0, Cv2.Norm(plain.Cleaned, nulls.Cleaned, NormTypes.INF));
     }
 
-    [Theory][InlineData(1.0, 1.0)][InlineData(3.864, 3.864)][InlineData(2.0, 2.5)]
-    public void DetectionAffineMatchesTheFullResolutionAffineThroughPixelCentres(double sx, double sy)
+    [Theory][InlineData(1.0, 1.0, 0, 0)][InlineData(3.864, 3.864, 0, 0)][InlineData(2.0, 2.5, 0, 0)][InlineData(1.0, 1.0, 640, 320)]
+    public void RemapGridsPullTheSourceThroughPixelCentres(double sx, double sy, int ox, int oy)
     {
-        using var full = new Mat(2, 3, MatType.CV_64FC1);
+        // A rotation + shift (full-res px). Grid value at region pixel (u, v) = source position, in the region's pixel
+        // space, of target pixel (u + ox, v + oy): full = (p + 0.5)·s − 0.5 both ways.
+        using var m = new Mat(2, 3, MatType.CV_64FC1);
         double t = 0.01;
-        full.Set(0, 0, Math.Cos(t)); full.Set(0, 1, -Math.Sin(t)); full.Set(0, 2, 35.0);
-        full.Set(1, 0, Math.Sin(t)); full.Set(1, 1, Math.Cos(t)); full.Set(1, 2, -12.0);
-        using var det = TrailRemover.DetectionAffine(full, sx, sy);
-        foreach (var (qx, qy) in new[] { (0.0, 0.0), (1999.0, 0.0), (700.5, 1200.25) })
+        m.Set(0, 0, Math.Cos(t)); m.Set(0, 1, -Math.Sin(t)); m.Set(0, 2, 35.0);
+        m.Set(1, 0, Math.Sin(t)); m.Set(1, 1, Math.Cos(t)); m.Set(1, 2, -12.0);
+        var warp = SkyWarp.FromAffine(m);
+        using var mapX = new Mat(); using var mapY = new Mat();
+        warp.BuildMaps(300, 200, ox, oy, sx, sy, mapX, mapY);
+        Assert.Equal((300, 200), (mapX.Cols, mapX.Rows));
+        foreach (var (u, v) in new[] { (0, 0), (299, 0), (157, 123), (299, 199) })
         {
-            double px = (qx + 0.5) * sx - 0.5, py = (qy + 0.5) * sy - 0.5;   // detection -> full
-            double fx = full.At<double>(0, 0) * px + full.At<double>(0, 1) * py + full.At<double>(0, 2);
-            double fy = full.At<double>(1, 0) * px + full.At<double>(1, 1) * py + full.At<double>(1, 2);
-            double ex = (fx + 0.5) / sx - 0.5, ey = (fy + 0.5) / sy - 0.5;   // full -> detection
-            double gx = det.At<double>(0, 0) * qx + det.At<double>(0, 1) * qy + det.At<double>(0, 2);
-            double gy = det.At<double>(1, 0) * qx + det.At<double>(1, 1) * qy + det.At<double>(1, 2);
-            Assert.Equal(ex, gx, 9);
-            Assert.Equal(ey, gy, 9);
+            var (fx, fy) = warp.MapBack((u + ox + 0.5) * sx - 0.5, (v + oy + 0.5) * sy - 0.5);
+            Assert.Equal((fx + 0.5) / sx - 0.5, mapX.At<float>(v, u), 2);
+            Assert.Equal((fy + 0.5) / sy - 0.5, mapY.At<float>(v, u), 2);
         }
     }
 
