@@ -10,6 +10,7 @@ namespace Orbitale.Engine.Imaging;
 internal static class TiffExifInjector
 {
     const ushort ExifIfdPointer = 0x8769, GpsIfdPointer = 0x8825, InteropIfdPointer = 0xA005;
+    const int MaxIfdDepth = 3;   // IFD0 → Exif/GPS IFD → Interop IFD
     static readonly HashSet<ushort> SkippedIfd0Tags = [273, 279, 330, 513, 514, 34675];
 
     sealed record Entry(ushort Tag, ushort Type, uint Count, byte[] Payload);
@@ -109,8 +110,10 @@ internal static class TiffExifInjector
             return list;
         }
 
-        // Produces final 12-byte entries (children appended first so offsets are known).
-        List<byte[]> Materialize(List<Entry> list, Func<ushort, bool> keep)
+        // Produces final 12-byte entries (children appended first so offsets are known). Malformed EXIF must never loop:
+        // a sub-IFD already visited or nested deeper than IFD0 → Exif → Interop is dropped.
+        var visited = new HashSet<uint>();
+        List<byte[]> Materialize(List<Entry> list, Func<ushort, bool> keep, int depth)
         {
             var res = new List<(ushort tag, byte[] raw)>();
             foreach (var e in list)
@@ -120,9 +123,10 @@ internal static class TiffExifInjector
                 {
                     uint childOff = Rd32(e.Payload, 0, dstLE); // already swapped to dst order
                     // payload was swapped to dst order above; childOff is in blob coordinates
+                    if (depth >= MaxIfdDepth || !visited.Add(childOff)) continue;
                     var child = ReadIfd(childOff);
                     if (child is null) continue;
-                    var childEntries = Materialize(child, _ => true);
+                    var childEntries = Materialize(child, _ => true, depth + 1);
                     long pos = WriteIfd(childEntries);
                     var ptr = new byte[4]; Wr32(ptr, 0, (uint)pos, dstLE);
                     res.Add((e.Tag, ToRaw(new Entry(e.Tag, 4, 1, ptr), 0, true)));
@@ -140,9 +144,11 @@ internal static class TiffExifInjector
             return Append(buf);
         }
 
-        var exifIfd0 = ReadIfd(Rd32(blob, 4, srcLE));
+        uint exifIfd0Offset = Rd32(blob, 4, srcLE);
+        var exifIfd0 = ReadIfd(exifIfd0Offset);
         if (exifIfd0 is null) return;
-        var added = Materialize(exifIfd0, t => !present.Contains(t) && !SkippedIfd0Tags.Contains(t));
+        visited.Add(exifIfd0Offset);
+        var added = Materialize(exifIfd0, t => !present.Contains(t) && !SkippedIfd0Tags.Contains(t), 1);
         if (added.Count == 0) return;
 
         var merged = entries.Concat(added).OrderBy(e => Rd16(e, 0, dstLE)).ToList();
