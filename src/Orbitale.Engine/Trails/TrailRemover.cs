@@ -45,7 +45,7 @@ public static class TrailRemover
     public static TrailCleanResult Clean(Mat frame, IReadOnlyList<Mat> neighbours, TrailSettings s)
     {
         ArgumentNullException.ThrowIfNull(neighbours);
-        return Clean(frame, neighbours.Select(n => new AlignedNeighbour(n, null)).ToList(), s);
+        return Clean(frame, neighbours.Select(n => new AlignedNeighbour(n, null)).ToList(), s, null, distinctLines: false);
     }
 
     /// <summary>
@@ -53,12 +53,14 @@ public static class TrailRemover
     /// (<see cref="AlignedNeighbour.ToCurrent"/>). A pixel is a trail candidate only if it is new against both the static
     /// median of the neighbours (the landscape cancels) and the median of the neighbours with their sky rotated into this
     /// frame (the stars cancel). The repair takes the aligned median in the sky and the static median in the landscape.
-    /// When no alignment is known this is exactly the unaligned prototype port.
+    /// With an alignment, pieces down to 0.01 of the long side are kept (slow planes). When no alignment is known the
+    /// detection and repair are exactly the unaligned prototype port. <see cref="TrailCleanResult.Segments"/> are the
+    /// distinct lines (collinear Hough pieces merged), which is what a user counts as trails.
     /// </summary>
     public static TrailCleanResult Clean(Mat frame, IReadOnlyList<AlignedNeighbour> neighbours, TrailSettings s) => Clean(frame, neighbours, s, null);
 
     /// <summary><see cref="Clean(Mat, IReadOnlyList{AlignedNeighbour}, TrailSettings)"/> with the frame's detection-scale copy (CV_32FC3) at hand, or null.</summary>
-    internal static TrailCleanResult Clean(Mat frame, IReadOnlyList<AlignedNeighbour> neighbours, TrailSettings s, Mat? frameDetection)
+    internal static TrailCleanResult Clean(Mat frame, IReadOnlyList<AlignedNeighbour> neighbours, TrailSettings s, Mat? frameDetection, bool distinctLines = true)
     {
         ArgumentNullException.ThrowIfNull(frame);
         ArgumentNullException.ThrowIfNull(neighbours);
@@ -101,7 +103,9 @@ public static class TrailRemover
         // Pixel-centre mapping (consistent with Area/Linear resize); identity when not downscaled.
         float X(float x) => (float)((x + 0.5) * sx - 0.5);
         float Y(float y) => (float)((y + 0.5) * sy - 0.5);
-        var segments = transient.Select(g => new LineSegment(X(g.X1), Y(g.Y1), X(g.X2), Y(g.Y2))).ToList();
+        // The repair masks every kept piece; the result reports distinct lines (Hough returns a trail as several pieces).
+        var reported = distinctLines ? TrailDetector.MergeCollinear(transient) : transient;
+        var segments = reported.Select(g => new LineSegment(X(g.X1), Y(g.Y1), X(g.X2), Y(g.Y2))).ToList();
 
         using var weight = FeatheredWeight(trailMask, frame.Size(), Math.Max(sx, sy));
         if (alignedGray is null)
@@ -131,7 +135,7 @@ public static class TrailRemover
         using var rStatic = TrailDetector.StarTolerantResidual(frameGray, staticGray, TrailDetector.StarDilate);
         using var rAligned = TrailDetector.StarTolerantResidual(frameGray, alignedGray, AlignedStarDilate);
         Cv2.Min(rStatic, rAligned, rStatic);
-        return TrailDetector.DetectResidual(rStatic, s);
+        return TrailDetector.DetectResidual(rStatic, s, shortPieces: true);
     }
 
     /// <summary>
@@ -143,6 +147,7 @@ public static class TrailRemover
     static Mat AlignedMedianGray(IReadOnlyList<AlignedNeighbour> neighbours, Size detSize, double sx, double sy)
     {
         var warped = new List<Mat>(neighbours.Count);
+        var outside = new List<Mat?>(neighbours.Count);   // 255 where the warped neighbour saw nothing (beyond its frame)
         try
         {
             foreach (var n in neighbours)
@@ -150,17 +155,46 @@ public static class TrailRemover
                 var source = n.Detection is { } d && d.Size() == detSize && d.Type() == MatType.CV_32FC3 ? d : n.Frame;
                 var gray = DetectionScale.ToGray(source, detSize);
                 warped.Add(gray);
+                outside.Add(null);
                 if (n.ToCurrent is null) continue;
                 using var m = DetectionAffine(n.ToCurrent, sx, sy);
                 using var tmp = new Mat();
                 Cv2.WarpAffine(gray, tmp, m, detSize, InterpolationFlags.Linear, BorderTypes.Replicate);
                 tmp.CopyTo(gray);
+                using var seen = new Mat();
+                using (var ones = new Mat(detSize, MatType.CV_8UC1, Scalar.All(255)))
+                    Cv2.WarpAffine(ones, seen, m, detSize, InterpolationFlags.Nearest, BorderTypes.Constant, Scalar.All(0));
+                var o = new Mat();
+                Cv2.Compare(seen, Scalar.All(0), o, CmpTypes.EQ);
+                outside[^1] = o;
+            }
+            // Stars entering the frame at its edges are in the later neighbours only: a replicated border would make them
+            // look new. Where a warped neighbour saw nothing, it takes the brightest value the others saw there.
+            if (outside.Any(o => o is not null && Cv2.CountNonZero(o) > 0))
+            {
+                using var brightest = new Mat(detSize, MatType.CV_32FC1, Scalar.All(float.MinValue));
+                for (int k = 0; k < warped.Count; k++)
+                {
+                    using var valid = new Mat(detSize, MatType.CV_32FC1, Scalar.All(float.MinValue));
+                    if (outside[k] is { } o) { using var inside = new Mat(); Cv2.BitwiseNot(o, inside); warped[k].CopyTo(valid, inside); }
+                    else warped[k].CopyTo(valid);
+                    Cv2.Max(brightest, valid, brightest);
+                }
+                using var anySeen = new Mat();
+                Cv2.Compare(brightest, Scalar.All(float.MinValue), anySeen, CmpTypes.GT);
+                for (int k = 0; k < warped.Count; k++)
+                {
+                    if (outside[k] is not { } o) continue;
+                    Cv2.BitwiseAnd(o, anySeen, o);
+                    brightest.CopyTo(warped[k], o);
+                }
             }
             return TemporalMedian.Compute(warped);
         }
         finally
         {
             foreach (var m in warped) m.Dispose();
+            foreach (var o in outside) o?.Dispose();
         }
     }
 

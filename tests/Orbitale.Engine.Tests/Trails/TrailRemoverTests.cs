@@ -306,6 +306,45 @@ public class TrailRemoverTests(ITestOutputHelper output)
         Assert.True(peakAfter >= 0.8 * peakBefore, $"star peak {peakBefore:F3} -> {peakAfter:F3}");
     }
 
+    [Fact] public void RemovesShortSlowPlanePieceInFastMovingSky()
+    {
+        // A slow plane records only a short piece per exposure: 30 detection px at 45 deg (dx = dy = 21 detection px),
+        // under the prototype's 0.03 x long side (60 detection px) and under OpenCV's per-axis length check for any
+        // minimum above 21. Production-like scale: detection at half size, stars moving 11 detection px per frame.
+        using var sky = FastSky(seed: 35, 4000, 2400, 0.4, 2000);
+        var a = new Point(1000, 400); var b = new Point(1042, 442);
+        using var clean = sky.Frames[2].Clone();
+        Cv2.Line(sky.Frames[2], a, b, Scalar.All(0.8), 4);
+        var ns = Aligned(sky.Frames);
+        using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
+        DisposeAffines(ns);
+        double before = TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y));
+        double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y));
+        output.WriteLine($"{r.Segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", r.Segments)}");
+        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 4);
+        Assert.True(after < before * 0.05, $"mean diff along the piece {before:F4} -> {after:F4}");
+    }
+
+    [Fact] public void MergesCollinearPiecesAndKeepsParallelLinesApart()
+    {
+        // Four overlapping near-collinear pieces of one trail (within 1 deg and 2 px) -> one line spanning their ends.
+        var pieces = new List<LineSegment>
+        {
+            new(100, 100, 400, 250), new(300, 201, 700, 401), new(690, 395, 900, 501), new(150, 126, 350, 226),
+        };
+        var merged = TrailDetector.MergeCollinear(pieces);
+        var line = Assert.Single(merged);
+        Assert.Equal(100, Math.Min(line.X1, line.X2), 0);
+        Assert.Equal(900, Math.Max(line.X1, line.X2), 0);
+        // Two parallel lines 10 px apart stay two.
+        var parallel = TrailDetector.MergeCollinear([new(100, 100, 900, 100), new(100, 110, 900, 110), new(500, 101, 950, 101)]);
+        Assert.Equal(2, parallel.Count);
+        // Collinear but 40 px apart end to end: two trails.
+        Assert.Equal(2, TrailDetector.MergeCollinear([new(0, 0, 100, 0), new(140, 0, 300, 0)]).Count);
+        // Collinear with a 20 px gap: one (blinking trail).
+        Assert.Single(TrailDetector.MergeCollinear([new(0, 0, 100, 0), new(120, 0, 300, 0)]));
+    }
+
     [Fact] public void RepairsTheLandscapeFromTheStaticMedian()
     {
         // A steep streak from the sky down through the ridge into the ground. Under the trail the ground (and the ridge
@@ -359,7 +398,8 @@ public class TrailRemoverTests(ITestOutputHelper output)
         using var nulls = TrailRemover.Clean(frames[2], nb.Select(m => new AlignedNeighbour(m, null)).ToList(), new TrailSettings());
         DisposeAll(frames);
         Assert.NotEmpty(plain.Segments);
-        Assert.Equal(plain.Segments, nulls.Segments);
+        // Same repair; the aligned overload reports the pieces merged into distinct lines (scale 1: same coordinates).
+        Assert.Equal(TrailDetector.MergeCollinear(plain.Segments), nulls.Segments);
         Assert.Equal(0.0, Cv2.Norm(plain.Cleaned, nulls.Cleaned, NormTypes.INF));
     }
 
