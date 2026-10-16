@@ -30,6 +30,9 @@ public sealed class FrameWindow : IDisposable
         _capacity = capacity;
     }
 
+    /// <summary>True when <paramref name="index"/> is decoded and cached (a <see cref="Get"/> would not decode).</summary>
+    internal bool IsCached(int index) { lock (_gate) return _cache.ContainsKey(index); }
+
     /// <summary>Test hook: the in-flight (or last) prefetch task.</summary>
     internal Task? PendingPrefetch { get { lock (_gate) return _pending; } }
 

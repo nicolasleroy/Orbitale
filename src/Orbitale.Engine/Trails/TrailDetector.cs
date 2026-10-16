@@ -23,7 +23,7 @@ public sealed record TrailDetection(Mat Mask8U, IReadOnlyList<LineSegment> Segme
 /// </summary>
 public static class TrailDetector
 {
-    const int StarDilate = 7;       // px, must exceed star drift between frames
+    internal const int StarDilate = 7; // px, must exceed star drift between frames
     internal const int MinBlob = 4; // drop residual blobs smaller than this (px)
     const double MinLength = 0.03;  // fraction of the long side
     const int MaxGap = 25;          // px gap allowed in dashed (blinking) trails
@@ -41,7 +41,17 @@ public static class TrailDetector
         if (frameGray32f.Size() != refGray32f.Size())
             throw new ArgumentException("Frame and reference sizes differ.");
 
-        using var binary = Binarize(frameGray32f, refGray32f, s.Sigma);
+        using var residual = StarTolerantResidual(frameGray32f, refGray32f, StarDilate);
+        return DetectResidual(residual, s);
+    }
+
+    /// <summary>
+    /// The detection pipeline after the residual: 3×3 blur, robust threshold, small-blob removal, HoughLinesP and the fill
+    /// check. <paramref name="residual"/> (CV_32FC1, not modified) is "frame − star-tolerant reference" at detection scale.
+    /// </summary>
+    internal static TrailDetection DetectResidual(Mat residual, TrailSettings s)
+    {
+        using var binary = Binarize(residual, s.Sigma);
         RemoveSmallBlobs(binary);
 
         int h = binary.Rows, w = binary.Cols;
@@ -58,6 +68,20 @@ public static class TrailDetector
         return new TrailDetection(DrawMask(binary.Size(), kept), kept);
     }
 
+    /// <summary>
+    /// frame − dilate(reference, <paramref name="dilate"/> px ellipse): a star of the reference that moved by at most
+    /// dilate/2 px is still covered. CV_32FC1, owned by the caller.
+    /// </summary>
+    internal static Mat StarTolerantResidual(Mat frameGray32f, Mat refGray32f, int dilate)
+    {
+        var residual = new Mat();
+        using var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(dilate, dilate));
+        using var refDil = new Mat();
+        Cv2.Dilate(refGray32f, refDil, k);
+        Cv2.Subtract(frameGray32f, refDil, residual);
+        return residual;
+    }
+
     /// <summary>The prototype's mask: width-7 lines, then a 5 px ellipse dilate when any segment is kept.</summary>
     internal static Mat DrawMask(Size size, IReadOnlyList<LineSegment> segments)
     {
@@ -72,23 +96,16 @@ public static class TrailDetector
         return mask;
     }
 
-    /// <summary>Star-tolerant residual, 3×3 blur, then a robust (median + σ·MAD) threshold. Returns 0/255 CV_8UC1.</summary>
-    static Mat Binarize(Mat frame, Mat reference, double sigma)
+    /// <summary>3×3 blur of the residual, then a robust (median + σ·MAD) threshold. Returns 0/255 CV_8UC1.</summary>
+    static Mat Binarize(Mat residual, double sigma)
     {
-        using var residual = new Mat();
-        using (var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(StarDilate, StarDilate)))
-        using (var refDil = new Mat())
-        {
-            // A star that moved by <= StarDilate/2 px is still covered by the dilated reference.
-            Cv2.Dilate(reference, refDil, k);
-            Cv2.Subtract(frame, refDil, residual);
-        }
-        Cv2.GaussianBlur(residual, residual, new Size(3, 3), 0);
+        using var blurred = new Mat();
+        Cv2.GaussianBlur(residual, blurred, new Size(3, 3), 0);
 
-        float threshold = RobustThreshold(residual, sigma);
+        float threshold = RobustThreshold(blurred, sigma);
 
         var binary = new Mat();
-        Cv2.Compare(residual, Scalar.All(threshold), binary, CmpTypes.GT);
+        Cv2.Compare(blurred, Scalar.All(threshold), binary, CmpTypes.GT);
         return binary;
     }
 
@@ -106,6 +123,18 @@ public static class TrailDetector
         for (int i = 0; i < values.Length; i++) values[i] = MathF.Abs(values[i] - med);
         float mad = Median(values) * 1.4826f + 1e-6f;
         return med + (float)sigma * mad;
+    }
+
+    /// <summary>Robust noise sigma of a continuous CV_32FC1 Mat: MAD·1.4826 (the spread <see cref="RobustThreshold"/> scales).</summary>
+    internal static float RobustSigma(Mat residual)
+    {
+        if (residual.Type() != MatType.CV_32FC1 || !residual.IsContinuous())
+            throw new ArgumentException("Residual must be a continuous CV_32FC1 Mat.", nameof(residual));
+        var values = new float[residual.Rows * residual.Cols];
+        Marshal.Copy(residual.Data, values, 0, values.Length);
+        float med = Median(values);
+        for (int i = 0; i < values.Length; i++) values[i] = MathF.Abs(values[i] - med);
+        return Median(values) * 1.4826f;
     }
 
     /// <summary>Removes 8-connected components smaller than <see cref="MinBlob"/> (moved stars, hot pixels).</summary>

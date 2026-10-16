@@ -165,6 +165,13 @@ public sealed class Sky : IDisposable
     /// <summary>Brightness-weighted centre of the star's image in frame <paramref name="f"/> (mean of the exposure sub-steps).</summary>
     public (double X, double Y) Centre(SkyStar s, double f) => Position(s, f, 2.5 / 6);
 
+    /// <summary>True sky motion from frame <paramref name="from"/> to frame <paramref name="to"/>: the rotation about the pole by (to − from)·Step.</summary>
+    public (double X, double Y) Rotate(double x, double y, int from, int to)
+    {
+        double t = (to - from) * Step, c = Math.Cos(t), s = Math.Sin(t), dx = x - Cx, dy = y - Cy;
+        return (Cx + c * dx - s * dy, Cy + s * dx + c * dy);
+    }
+
     /// <summary>Distance the star moves between consecutive frames, px.</summary>
     public double Jump(SkyStar s) => s.R * Step;
 

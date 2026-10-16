@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using OpenCvSharp;
+using Orbitale.Engine.Alignment;
 using Orbitale.Engine.Blending;
 using Orbitale.Engine.Frames;
 using Orbitale.Engine.GapFill;
@@ -27,6 +28,15 @@ internal sealed class StackRun
     readonly HashSet<int> _undecodable = new();
     readonly List<string> _notices = new();
 
+    // Sky alignment: per file index the detection-scale copy of the frame (owned) and its brightest stars (raw frame, no
+    // exclude mask), and the sky motion per index pair (lo, hi) as the 2x3 affine lo -> hi (null = no reliable estimate).
+    // All keep only what the current and next frame need.
+    const int AlignStarsMax = 4000;  // brightest stars used for alignment: plenty for RANSAC, cheaper and less ambiguous matching
+    readonly Dictionary<int, (Mat Detection, IReadOnlyList<Star> Stars)> _alignStars = new();
+    readonly Dictionary<int, Task<(Mat Detection, IReadOnlyList<Star> Stars)>> _pendingAlign = new();   // started early, see StartAlignStars
+    readonly Dictionary<(int Lo, int Hi), double[]?> _skyMotion = new();
+    readonly double _detScale;
+
     IReadOnlyList<Star>? _prevStars;
     int _processed, _trailsTotal;
     PreviewImage? _lastPreview;
@@ -43,6 +53,8 @@ internal sealed class StackRun
         _trailSettings = new TrailSettings(s.TrailSensitivity);
         if (s.RemoveTrails && _n < 3) _notices.Add(TooFewFramesNotice);
         _k = s.RemoveTrails ? NeighbourWindow.EffectiveK(_n, s.NeighbourK) : 0;
+        var det = DetectionScale.For(new Size(seq.Width, seq.Height));
+        _detScale = (double)Math.Max(seq.Width, seq.Height) / Math.Max(det.Width, det.Height);
     }
 
     public StackResult Run()
@@ -63,7 +75,14 @@ internal sealed class StackRun
         }
         finally
         {
+            foreach (var task in _pendingAlign.Values)
+            {
+                try { task.Result.Detection.Dispose(); } catch (AggregateException) { /* the run is over either way */ }
+            }
+            _pendingAlign.Clear();
             window.Dispose();   // free the decoded frames before the result is copied
+            foreach (var a in _alignStars.Values) a.Detection.Dispose();
+            _alignStars.Clear();
         }
         try
         {
@@ -91,21 +110,35 @@ internal sealed class StackRun
             Report(i, [], _lastPreview ?? Preview.Blank(_seq.Width, _seq.Height, _s.PreviewMaxLongSide), clock);
             return true;
         }
-        var neighbours = new List<Mat>();
+        var neighbours = new List<(int Index, Mat Frame)>();
         int[] neighbourIdx = _k > 0 ? NeighbourWindow.Indices(i, _n, _k) : [];
         foreach (int j in neighbourIdx)
-            if (TryGet(window, j) is { } m) neighbours.Add(m);
+            if (TryGet(window, j) is { } m) neighbours.Add((j, m));
         PrefetchNext(p, i, neighbourIdx, window);
         long t1 = Stopwatch.GetTimestamp();
 
-        // 2. Trail removal. Owned: the cleaned frame, or a copy when gap filling will draw on it.
+        // 2. Sky alignment of each neighbour into this frame, then trail removal. Owned: the affines; the cleaned frame,
+        // or a copy when gap filling will draw on it.
         Mat work;
         IReadOnlyList<LineSegment> segments = [];
+        long t1b = t1;
         if (neighbours.Count >= TemporalMedian.MinFrames)
         {
-            var clean = TrailRemover.Clean(frame, neighbours, _trailSettings);
-            work = clean.Cleaned;
-            segments = clean.Segments;
+            var aligned = neighbours.Select(n => new AlignedNeighbour(n.Frame, SkyMotion(n.Index, i, window))
+                { Detection = _alignStars.TryGetValue(n.Index, out var a) ? a.Detection : null }).ToList();
+            t1b = Stopwatch.GetTimestamp();
+            try
+            {
+                var clean = TrailRemover.Clean(frame, aligned, _trailSettings, _alignStars.TryGetValue(i, out var self) ? self.Detection : null);
+                work = clean.Cleaned;
+                segments = clean.Segments;
+            }
+            finally
+            {
+                foreach (var a in aligned) a.ToCurrent?.Dispose();
+                ForgetSkyMotionOutside(p, i, neighbourIdx);
+            }
+            StartAlignStars(p, window);
         }
         else work = _gapFiller is not null ? frame.Clone() : frame;
         bool owned = !ReferenceEquals(work, frame);
@@ -137,13 +170,130 @@ internal sealed class StackRun
             _lastPreview = preview;
             long t5 = Stopwatch.GetTimestamp();
             Report(i, segments, preview, clock);
-            _timings?.Invoke(new FrameTimings(i, Ms(t0, t1), Ms(t1, t2), Ms(t2, t3), Ms(t3, t4), Ms(t4, t5)));
+            _timings?.Invoke(new FrameTimings(i, Ms(t0, t1), Ms(t1, t1b), Ms(t1b, t2), Ms(t2, t3), Ms(t3, t4), Ms(t4, t5)));
             return true;
         }
         finally
         {
             if (owned) work.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The sky motion from file <paramref name="j"/> into file <paramref name="i"/> as a new 2×3 CV_64FC1 affine (owned by
+    /// the caller), or null when it cannot be estimated. Each index pair is estimated once, lower index to higher, and
+    /// inverted for the other direction, so the result does not depend on the processing order.
+    /// </summary>
+    Mat? SkyMotion(int j, int i, FrameWindow window)
+    {
+        var lohi = PairMotion(Math.Min(i, j), Math.Max(i, j), window);
+        if (lohi is null) return null;
+        var result = new Mat(2, 3, MatType.CV_64FC1);
+        for (int r = 0; r < 2; r++) for (int c = 0; c < 3; c++) result.Set(r, c, lohi[3 * r + c]);
+        if (j < i) return result;
+        using (result)
+        {
+            var inverse = new Mat();
+            Cv2.InvertAffineTransform(result, inverse);
+            return inverse;
+        }
+    }
+
+    /// <summary>
+    /// The affine lo → hi (row-major 2×3), cached. Estimated directly from the two frames' stars; when that fails over a
+    /// gap of more than one frame (the matching radius grows with the gap, and dense star fields then fail the ratio
+    /// test), it is chained from the frame-to-frame motions lo → lo+1 → … → hi.
+    /// </summary>
+    double[]? PairMotion(int lo, int hi, FrameWindow window)
+    {
+        if (_skyMotion.TryGetValue((lo, hi), out var cached)) return cached;
+        double[]? result = null;
+        if (AlignStars(lo, window) is { } a && AlignStars(hi, window) is { } b)
+        {
+            using var m = SkyAligner.Estimate(a, b, 6 + 12 * (hi - lo), _detScale);
+            if (m is not null)
+            {
+                result = new double[6];
+                for (int r = 0; r < 2; r++) for (int c = 0; c < 3; c++) result[3 * r + c] = m.At<double>(r, c);
+            }
+        }
+        if (result is null && hi - lo > 1)
+        {
+            result = [1, 0, 0, 0, 1, 0];
+            for (int t = lo; t < hi && result is not null; t++)
+                result = PairMotion(t, t + 1, window) is { } step ? Compose(step, result) : null;
+        }
+        _skyMotion[(lo, hi)] = result;
+        return result;
+    }
+
+    /// <summary>Second ∘ first for 2×3 row-major affines (apply <paramref name="first"/>, then <paramref name="second"/>).</summary>
+    static double[] Compose(double[] second, double[] first) =>
+    [
+        second[0] * first[0] + second[1] * first[3], second[0] * first[1] + second[1] * first[4], second[0] * first[2] + second[1] * first[5] + second[2],
+        second[3] * first[0] + second[4] * first[3], second[3] * first[1] + second[4] * first[4], second[3] * first[2] + second[4] * first[5] + second[5],
+    ];
+
+    /// <summary>
+    /// The brightest stars of file <paramref name="index"/> for sky alignment, detected once on the raw frame (its
+    /// detection-scale copy is kept for trail removal); null when the file cannot be decoded.
+    /// </summary>
+    IReadOnlyList<Star>? AlignStars(int index, FrameWindow window)
+    {
+        if (_alignStars.TryGetValue(index, out var cached)) return cached.Stars;
+        if (_pendingAlign.Remove(index, out var pending)) return (_alignStars[index] = pending.Result).Stars;
+        if (TryGet(window, index) is not { } frame) return null;
+        return (_alignStars[index] = DetectAlignStars(frame)).Stars;
+    }
+
+    /// <summary>
+    /// Starts detecting, on a worker thread, the alignment stars of the frames the next processed frame will need that are
+    /// already decoded (in practice the one entering the neighbour window, prefetched during this frame). Star detection is
+    /// mostly serial, so it overlaps well with the rest of this frame. The window keeps the frame: it is the most recently
+    /// used one, and the next eviction (when the next prefetch lands) takes the least recently used.
+    /// </summary>
+    void StartAlignStars(int p, FrameWindow window)
+    {
+        if (p + 1 >= _n) return;
+        int next = _order[p + 1];
+        foreach (int j in NeighbourWindow.Indices(next, _n, _k).Append(next))
+        {
+            if (_alignStars.ContainsKey(j) || _pendingAlign.ContainsKey(j) || _undecodable.Contains(j) || !window.IsCached(j)) continue;
+            var frame = window.Get(j);
+            _pendingAlign[j] = Task.Run(() => DetectAlignStars(frame));
+        }
+    }
+
+    /// <summary>The frame's detection-scale copy (owned by the caller) and its brightest stars.</summary>
+    static (Mat Detection, IReadOnlyList<Star> Stars) DetectAlignStars(Mat frame)
+    {
+        var detection = new Mat();
+        var detSize = DetectionScale.For(frame.Size());
+        if (frame.Size() == detSize) frame.CopyTo(detection);
+        else Cv2.Resize(frame, detection, detSize, 0, 0, InterpolationFlags.Area);
+        var stars = StarDetector.Detect(frame, null, detection);
+        if (stars.Count > AlignStarsMax)
+            stars = stars.OrderByDescending(st => Math.Max(st.Color.Item0, Math.Max(st.Color.Item1, st.Color.Item2))).ThenBy(st => st.Y).ThenBy(st => st.X)
+                         .Take(AlignStarsMax).ToList();
+        return (detection, stars);
+    }
+
+    /// <summary>Drops the stars and pair motions that neither this frame nor the next processed one needs.</summary>
+    void ForgetSkyMotionOutside(int p, int i, int[] neighbourIdx)
+    {
+        var keep = new HashSet<int>(neighbourIdx) { i };
+        if (p + 1 < _n)
+        {
+            int next = _order[p + 1];
+            keep.Add(next);
+            keep.UnionWith(NeighbourWindow.Indices(next, _n, _k));
+        }
+        foreach (int index in _alignStars.Keys.Where(x => !keep.Contains(x)).ToList())
+        {
+            _alignStars[index].Detection.Dispose();
+            _alignStars.Remove(index);
+        }
+        foreach (var key in _skyMotion.Keys.Where(x => !keep.Contains(x.Lo) || !keep.Contains(x.Hi)).ToList()) _skyMotion.Remove(key);
     }
 
     /// <summary>The window's frame (owned by the window), or null when it cannot be decoded (noticed once per file).</summary>

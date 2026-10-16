@@ -16,12 +16,14 @@ internal static class StackFiles
     }
 
     /// <summary>Writes <paramref name="n"/> <see cref="SyntheticSky"/> frames as JPGs f00.jpg … into a new temp dir; returns their paths in order.</summary>
-    public static List<string> SyntheticFiles(int n, string? dir = null)
+    public static List<string> SyntheticFiles(int n, string? dir = null) => SyntheticFiles(SyntheticSky.Make(n, Width, Height, 40, 0.5, seed: 3), dir);
+
+    /// <summary>Writes (and disposes) <paramref name="frames"/> as JPGs f00.jpg … into a new temp dir; returns their paths in order.</summary>
+    public static List<string> SyntheticFiles(IReadOnlyList<OpenCvSharp.Mat> frames, string? dir = null)
     {
         dir ??= NewTempDir();
-        var frames = SyntheticSky.Make(n, Width, Height, 40, 0.5, seed: 3);
         var paths = new List<string>();
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < frames.Count; i++)
         {
             var p = Path.Combine(dir, $"f{i:D2}.jpg");
             ImageWriter.Save(frames[i], p, new ImageMetadata());

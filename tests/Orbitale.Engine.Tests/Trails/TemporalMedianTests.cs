@@ -101,6 +101,15 @@ public class TemporalMedianTests
         DisposeAll(one); DisposeAll(seven);
     }
 
+    [Fact] public void GrayFramesGiveAGrayMedian()
+    {
+        var frames = new[] { 0.1f, 0.9f, 0.3f, 0.5f }.Select(v => new Mat(3, 5, MatType.CV_32FC1, Scalar.All(v))).ToList();
+        using var m = TemporalMedian.Compute(frames);
+        DisposeAll(frames);
+        Assert.Equal(MatType.CV_32FC1, m.Type());
+        Assert.Equal(0.4f, m.At<float>(2, 4), 6);   // mean of the middle two, at the last pixel of the last row
+    }
+
     [Fact] public void RejectsMismatchedSizeOrType()
     {
         using var a = Solid(0.5f); using var b = Solid(0.5f, 3, 4);

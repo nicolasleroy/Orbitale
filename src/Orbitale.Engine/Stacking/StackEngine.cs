@@ -3,7 +3,7 @@ using Orbitale.Engine.Frames;
 namespace Orbitale.Engine.Stacking;
 
 /// <summary>Per-frame stage durations of a run, for profiling (the CLI harness prints them).</summary>
-internal sealed record FrameTimings(int FileIndex, double DecodeMs, double CleanMs, double GapFillMs, double AccumulateMs, double PreviewMs);
+internal sealed record FrameTimings(int FileIndex, double DecodeMs, double AlignMs, double CleanMs, double GapFillMs, double AccumulateMs, double PreviewMs);
 
 /// <summary>
 /// Stacks a frame sequence: for each frame, in file order (reversed with <see cref="StackSettings.HeadAtStart"/>),

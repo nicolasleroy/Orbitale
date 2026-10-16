@@ -2,7 +2,7 @@ using OpenCvSharp;
 
 namespace Orbitale.Engine.Trails;
 
-/// <summary>Per-pixel, per-channel temporal median of 2..6 CV_32FC3 frames.</summary>
+/// <summary>Per-pixel, per-channel temporal median of 2..6 frames, all CV_32FC3 or all CV_32FC1.</summary>
 public static class TemporalMedian
 {
     public const int MinFrames = 2;
@@ -15,20 +15,21 @@ public static class TemporalMedian
         if (n < MinFrames || n > MaxFrames)
             throw new ArgumentException($"Temporal median needs {MinFrames}..{MaxFrames} frames, got {n}.", nameof(frames));
         int rows = frames[0].Rows, cols = frames[0].Cols;
+        var type = frames[0].Type() == MatType.CV_32FC1 ? MatType.CV_32FC1 : MatType.CV_32FC3;
         for (int f = 0; f < n; f++)
         {
             var m = frames[f];
-            if (m.Type() != MatType.CV_32FC3)
-                throw new ArgumentException($"Frame {f} is {m.Type()}, expected CV_32FC3.", nameof(frames));
+            if (m.Type() != type)
+                throw new ArgumentException($"Frame {f} is {m.Type()}, expected {type}.", nameof(frames));
             if (m.Rows != rows || m.Cols != cols)
                 throw new ArgumentException($"Frame {f} is {m.Cols}x{m.Rows}, expected {cols}x{rows}.", nameof(frames));
         }
 
-        var result = new Mat(rows, cols, MatType.CV_32FC3);
+        var result = new Mat(rows, cols, type);
         try
         {
             // Mat.Ptr(row) is the per-row base address, so ROI (non-continuous) inputs work.
-            int len = cols * 3;
+            int len = cols * type.Channels;
             Parallel.For(0, rows, r =>
             {
                 float** src = stackalloc float*[MaxFrames];

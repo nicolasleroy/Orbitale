@@ -4,11 +4,12 @@ using Orbitale.Engine.Frames;
 using Orbitale.Engine.Imaging;
 using Orbitale.Engine.Stacking;
 using Orbitale.Engine.Tests.Support;
+using Xunit.Abstractions;
 using static Orbitale.Engine.Tests.Stacking.StackFiles;
 
 namespace Orbitale.Engine.Tests.Stacking;
 
-public class StackEngineTests
+public class StackEngineTests(ITestOutputHelper output)
 {
     [Fact] public async Task ReportsEveryFrameAndCompletes()
     {
@@ -187,6 +188,63 @@ public class StackEngineTests
         Assert.Equal(expected.IccProfile, r.Metadata.IccProfile);
         var full = r.RenderFull();
         Assert.Equal((Width, Height, Width * Height * 4), (full.Width, full.Height, full.Bgra.Length));
+    }
+
+    [Fact] public async Task FastRotatingSkyKeepsStarTrailsAndRemovesOnlyTheStreak()
+    {
+        // 8 frames at 1200 x 800, 0.8 deg/frame: stars at the sky's lower corners move 14 px per frame (twice the 7 px
+        // reference dilation). One solid streak in frame 4. Only the streak may be removed, and the star trails it
+        // crossed must stay continuous in the Lighten stack. No landscape: stars rising from behind a ridge are new
+        // light against every reference in the last frames (see the Task 8b report); this test is about the sky.
+        var a = new Point(150, 60); var b = new Point(650, 560);   // 45 deg, across the (near horizontal) star trails
+        List<Mat> Frames(bool streak)
+        {
+            var frames = SyntheticSky.Make(8, 1200, 800, 600, 0.8, seed: 41, landscape: false, noise: 0.01);
+            if (streak) SyntheticSky.DrawStreak(frames[4], a, b, 0.8, dashed: false);
+            return frames;
+        }
+        var reports = new List<StackProgress>();
+        using var withStreak = await new StackEngine().RunAsync(FrameSequence.Build(SyntheticFiles(Frames(streak: true))), new StackSettings(),
+            new SyncProgress<StackProgress>(reports.Add), default);
+        var cleanReports = new List<StackProgress>();
+        using var without = await new StackEngine().RunAsync(FrameSequence.Build(SyntheticFiles(Frames(streak: false))), new StackSettings(),
+            new SyncProgress<StackProgress>(cleanReports.Add), default);
+
+        Assert.True(withStreak.Completed);
+        int total = reports[^1].TrailsTotal;
+        output.WriteLine($"segments per frame: {string.Join(" ", reports.Select(p => p.TrailsInFrame))}; without streak: {cleanReports[^1].TrailsTotal}");
+        // Only the streak: HoughLinesP may return it as a few overlapping pieces (their number swings with sub-pixel
+        // changes), so the test pins where the segments are rather than how many there are.
+        Assert.InRange(total, 1, 10);
+        var p4 = reports.Single(p => p.FileIndex == 4);
+        Assert.Equal(total, p4.TrailsInFrame);
+        // The preview is full size here (1200 < 2560), so preview coordinates are full-resolution ones.
+        Assert.All(p4.RemovedTrailsPreviewCoords, s => Assert.True(TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6, $"stray segment {s}"));
+        Assert.Equal(0, cleanReports[^1].TrailsTotal);
+
+        // Star-trail light in the streak's corridor (+-8 px): kept light = sum of min(result, reference) - background over
+        // the reference's star pixels, relative to the reference (the same run without the streak).
+        double kept = 0, all = 0;
+        var corridor = new List<(int X, int Y)>();
+        double len = Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
+        for (int y = 0; y < 800; y++)
+            for (int x = 0; x < 1200; x++)
+                if (Math.Abs((b.Y - a.Y) * (x - a.X) - (b.X - a.X) * (y - a.Y)) / len <= 8 && x >= a.X && x <= b.X) corridor.Add((x, y));
+        double bg = corridor.Select(q => (double)without.Image.At<Vec3f>(q.Y, q.X).Item1).Order().ElementAt(corridor.Count / 2);
+        int starPx = 0;
+        foreach (var (x, y) in corridor)
+        {
+            double n = without.Image.At<Vec3f>(y, x).Item1, r = withStreak.Image.At<Vec3f>(y, x).Item1;
+            if (n - bg < 0.05) continue;
+            starPx++;
+            all += n - bg;
+            kept += Math.Max(0, Math.Min(r, n) - bg);
+        }
+        double streakLeft = TestMasks.MeanAbsDiffAlong(withStreak.Image, without.Image, (a.X, a.Y), (b.X, b.Y));
+        output.WriteLine($"{starPx} star-trail px in the corridor, continuity {kept / all:P1}, streak residue {streakLeft:F4}");
+        Assert.True(starPx > 200, $"only {starPx} star-trail pixels cross the corridor");
+        Assert.True(kept >= 0.95 * all, $"star-trail continuity {kept / all:P1}");
+        Assert.True(streakLeft < 0.03, $"streak residue {streakLeft:F4}");
     }
 
     /// <summary>Cuts a JPG 64 bytes into its scan (after the SOS marker): the header still reads, the pixels no longer decode.</summary>

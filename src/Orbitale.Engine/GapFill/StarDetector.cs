@@ -23,7 +23,13 @@ public static class StarDetector
     /// half-maximum radius, mapped to full resolution through pixel centres. Stars whose full-res centroid lies under <paramref name="excludeMask8U"/>
     /// (non-zero = removed trail) are dropped.
     /// </summary>
-    public static unsafe IReadOnlyList<Star> Detect(Mat frame32f, Mat? excludeMask8U = null)
+    public static IReadOnlyList<Star> Detect(Mat frame32f, Mat? excludeMask8U = null) => Detect(frame32f, excludeMask8U, null);
+
+    /// <summary>
+    /// <see cref="Detect(Mat, Mat?)"/> with the frame's detection-scale copy (CV_32FC3, from <see cref="DetectionScale"/>)
+    /// already at hand, or null to make it.
+    /// </summary>
+    internal static unsafe IReadOnlyList<Star> Detect(Mat frame32f, Mat? excludeMask8U, Mat? detectionBgr)
     {
         ArgumentNullException.ThrowIfNull(frame32f);
         if (frame32f.Type() != MatType.CV_32FC3)
@@ -33,7 +39,7 @@ public static class StarDetector
 
         var detSize = DetectionScale.For(frame32f.Size());
         using var top = new Mat();
-        using (var gray = DetectionScale.ToGray(frame32f, detSize))
+        using (var gray = detectionBgr is not null && detectionBgr.Size() == detSize ? DetectionScale.ToGray(detectionBgr, detSize) : DetectionScale.ToGray(frame32f, detSize))
         using (var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(TopHatSize, TopHatSize)))
             Cv2.MorphologyEx(gray, top, MorphTypes.TopHat, k);
 

@@ -1,11 +1,14 @@
 using OpenCvSharp;
+using Orbitale.Engine.Alignment;
+using Orbitale.Engine.GapFill;
 using Orbitale.Engine.Imaging;
 using Orbitale.Engine.Tests.Support;
 using Orbitale.Engine.Trails;
+using Xunit.Abstractions;
 
 namespace Orbitale.Engine.Tests.Trails;
 
-public class TrailRemoverTests
+public class TrailRemoverTests(ITestOutputHelper output)
 {
     static Mat S(int n) => ImageReader.Read(Path.Combine(AppContext.BaseDirectory, "samples", $"{n}.jpg"));
 
@@ -220,6 +223,165 @@ public class TrailRemoverTests
         double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (200, 300), (3000, 1200));
         DisposeAll(frames);
         Assert.True(after < before * 0.05, $"mean diff along streak {before:F3} -> {after:F3}");
+    }
+
+    // ---- Sky-aligned removal (Task 8b) ----
+
+    // 0.8 deg/frame about (600, -200) at 1200 x 800 (detection scale 1): stars at the sky's lower corners (R ~ 1000 px)
+    // move 14 px per frame, twice the 7 px reference dilation, as on 40 MP frames far from the pole. Dense star field.
+    // The 4000 x 2400 variant runs detection at half scale (2000 x 1200): 0.4 deg/frame moves its lower corners
+    // (R ~ 3100 px) by 22 full-res px = 11 detection px per frame.
+    static Sky FastSky(int seed, int w = 1200, int h = 800, double deg = 0.8, int stars = 600) => SyntheticSky.Generate(5, w, h, stars, deg, seed);
+
+    /// <summary>Neighbours 0, 1, 3, 4 of frame 2, each with its estimated sky motion into frame 2. The caller disposes the affines.</summary>
+    static List<AlignedNeighbour> Aligned(IList<Mat> frames, int i = 2)
+    {
+        var size = frames[i].Size();
+        double scale = (double)Math.Max(size.Width, size.Height) / Math.Max(DetectionScale.For(size).Width, DetectionScale.For(size).Height);
+        var target = StarDetector.Detect(frames[i]);
+        return Enumerable.Range(0, frames.Count).Where(j => j != i)
+            .Select(j => new AlignedNeighbour(frames[j], SkyAligner.Estimate(StarDetector.Detect(frames[j]), target, 6 + 12 * Math.Abs(j - i), scale)))
+            .ToList();
+    }
+
+    static void DisposeAffines(IEnumerable<AlignedNeighbour> ns) { foreach (var n in ns) n.ToCurrent?.Dispose(); }
+
+    [Fact] public void NoFalsePositivesWhenStarsMoveFast()
+    {
+        using var sky = FastSky(seed: 31);
+        Assert.True(sky.Step * 1000 >= 12, $"stars at the sky's corners move only {sky.Step * 1000:F1} px per frame");
+        var ns = Aligned(sky.Frames);
+        Assert.All(ns, n => Assert.NotNull(n.ToCurrent));
+        using var aligned = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
+        using var unaligned = TrailRemover.Clean(sky.Frames[2], ns.Select(n => n.Frame).ToList(), new TrailSettings());
+        DisposeAffines(ns);
+        output.WriteLine($"segments: aligned {aligned.Segments.Count}, unaligned {unaligned.Segments.Count}");
+        Assert.True(unaligned.Segments.Count > 0, "the scene must defeat the unaligned reference");
+        Assert.Empty(aligned.Segments);
+        Assert.Equal(0.0, Cv2.Norm(sky.Frames[2], aligned.Cleaned, NormTypes.INF));
+    }
+
+    [Theory][InlineData(1200, 800, 0.8, 600)][InlineData(4000, 2400, 0.4, 2000)]
+    public void RemovesStreakInFastMovingSky(int w, int h, double deg, int stars)
+    {
+        using var sky = FastSky(seed: 32, w, h, deg, stars);
+        var a = new Point(w / 30, h * 3 / 20); var b = new Point(w * 29 / 30, h * 47 / 80);
+        using var clean = sky.Frames[2].Clone();
+        SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
+        var ns = Aligned(sky.Frames);
+        using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
+        DisposeAffines(ns);
+        double before = TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y));
+        double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y));
+        output.WriteLine($"{r.Segments.Count} segments, mean diff along streak {before:F4} -> {after:F4}");
+        Assert.NotEmpty(r.Segments);
+        Assert.All(r.Segments, s => Assert.True(TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6, $"stray segment {s}"));
+        Assert.True(after < before * 0.05, $"mean diff along streak {before:F4} -> {after:F4}");
+    }
+
+    [Theory][InlineData(1200, 800, 0.8, 600)][InlineData(4000, 2400, 0.4, 2000)]
+    public void KeepsStarOnTheTrailAxisWhenAligned(int w, int h, double deg, int stars)
+    {
+        // A peak-0.3 sky star that rotates with the others and sits exactly on the streak axis in frame 2. The unaligned
+        // median does not hold it (it moved 14 px), the aligned median does, so the repair keeps it.
+        using var sky = FastSky(seed: 33, w, h, deg, stars);
+        var a = new Point(w / 30, h * 3 / 20); var b = new Point(w * 29 / 30, h * 47 / 80);
+        double t = 0.85;
+        double sx = a.X + t * (b.X - a.X), sy = a.Y + t * (b.Y - a.Y);   // on the axis, in the fast-moving lower right
+        using var noStar = sky.Frames[2].Clone();
+        for (int f = 0; f < 5; f++)
+        {
+            var (x, y) = sky.Rotate(sx, sy, 2, f);
+            SyntheticSky.DrawStar(sky.Frames[f], x, y, 0.3, 1.5);
+        }
+        int px = (int)Math.Round(sx), py = (int)Math.Round(sy);
+        double peakBefore = sky.Frames[2].At<Vec3f>(py, px).Item1 - noStar.At<Vec3f>(py, px).Item1;
+        SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
+        var ns = Aligned(sky.Frames);
+        using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
+        DisposeAffines(ns);
+        double peakAfter = r.Cleaned.At<Vec3f>(py, px).Item1 - noStar.At<Vec3f>(py, px).Item1;
+        output.WriteLine($"{r.Segments.Count} segments, star peak {peakBefore:F3} -> {peakAfter:F3}");
+        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6);
+        Assert.True(peakAfter >= 0.8 * peakBefore, $"star peak {peakBefore:F3} -> {peakAfter:F3}");
+    }
+
+    [Fact] public void RepairsTheLandscapeFromTheStaticMedian()
+    {
+        // A steep streak from the sky down through the ridge into the ground. Under the trail the ground (and the ridge
+        // line) must come back from the static median: the aligned one holds a rotated landscape, sky light below the ridge.
+        using var sky = FastSky(seed: 34);
+        var a = new Point(80, 300); var b = new Point(380, 790);
+        using var clean = sky.Frames[2].Clone();
+        SyntheticSky.DrawStreak(sky.Frames[2], a, b, 0.8, dashed: false);
+        var ns = Aligned(sky.Frames);
+        using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
+        DisposeAffines(ns);
+        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6);
+        // Ground pixels of the trail corridor (+-8 px), from the ridge down: the repair is the static median.
+        double worst = 0, sum = 0; int count = 0;
+        for (int y = 400; y < 790; y++)
+        {
+            double cx = a.X + (b.X - a.X) * (y - a.Y) / (double)(b.Y - a.Y);
+            for (int x = (int)cx - 8; x <= (int)cx + 8; x++)
+            {
+                if (sky.Land!.At<byte>(y, x) == 0) continue;
+                double d = Math.Abs(r.Cleaned.At<Vec3f>(y, x).Item1 - clean.At<Vec3f>(y, x).Item1);
+                worst = Math.Max(worst, d); sum += d; count++;
+            }
+        }
+        output.WriteLine($"{count} ground px: mean diff {sum / count:F4}, max {worst:F4}");
+        Assert.True(count > 1000);
+        Assert.True(worst < 0.02, $"ground changed by up to {worst:F4} under the trail");
+    }
+
+    [Theory][InlineData(0.6)][InlineData(1.0)]
+    public void StaticStraightBrightLineIsNeverDetectedWhenAligned(double sensitivity)
+    {
+        var frames = SyntheticSky.Make(5, 1200, 800, 600, 0.15, seed: 1);
+        SyntheticSky.DrawStaticLine(frames, new(100, 650), new(1100, 640), 0.9);   // in landscape, all frames
+        var ns = Aligned(frames);
+        Assert.All(ns, n => Assert.NotNull(n.ToCurrent));
+        using var r = TrailRemover.Clean(frames[2], ns, new TrailSettings(Sensitivity: sensitivity));
+        DisposeAffines(ns);
+        DisposeAll(frames);
+        double lineAngle = Math.Atan2(640 - 650, 1100 - 100) * 180 / Math.PI;
+        Assert.DoesNotContain(r.Segments, s => TestMasks.DistanceToLine(s, (100, 650), (1100, 640)) < 10
+                                             && Math.Abs(TestMasks.AngleDeg(s) - lineAngle) < 5);
+    }
+
+    [Fact] public void UnknownAlignmentBehavesExactlyAsTheUnalignedOverload()
+    {
+        var frames = SyntheticSky.Make(5, 1200, 800, 600, 0.15, seed: 2);
+        SyntheticSky.DrawStreak(frames[2], new(50, 100), new(1000, 400), 0.8, dashed: true);
+        var nb = new[] { frames[0], frames[1], frames[3], frames[4] };
+        using var plain = TrailRemover.Clean(frames[2], nb, new TrailSettings());
+        using var nulls = TrailRemover.Clean(frames[2], nb.Select(m => new AlignedNeighbour(m, null)).ToList(), new TrailSettings());
+        DisposeAll(frames);
+        Assert.NotEmpty(plain.Segments);
+        Assert.Equal(plain.Segments, nulls.Segments);
+        Assert.Equal(0.0, Cv2.Norm(plain.Cleaned, nulls.Cleaned, NormTypes.INF));
+    }
+
+    [Theory][InlineData(1.0, 1.0)][InlineData(3.864, 3.864)][InlineData(2.0, 2.5)]
+    public void DetectionAffineMatchesTheFullResolutionAffineThroughPixelCentres(double sx, double sy)
+    {
+        using var full = new Mat(2, 3, MatType.CV_64FC1);
+        double t = 0.01;
+        full.Set(0, 0, Math.Cos(t)); full.Set(0, 1, -Math.Sin(t)); full.Set(0, 2, 35.0);
+        full.Set(1, 0, Math.Sin(t)); full.Set(1, 1, Math.Cos(t)); full.Set(1, 2, -12.0);
+        using var det = TrailRemover.DetectionAffine(full, sx, sy);
+        foreach (var (qx, qy) in new[] { (0.0, 0.0), (1999.0, 0.0), (700.5, 1200.25) })
+        {
+            double px = (qx + 0.5) * sx - 0.5, py = (qy + 0.5) * sy - 0.5;   // detection -> full
+            double fx = full.At<double>(0, 0) * px + full.At<double>(0, 1) * py + full.At<double>(0, 2);
+            double fy = full.At<double>(1, 0) * px + full.At<double>(1, 1) * py + full.At<double>(1, 2);
+            double ex = (fx + 0.5) / sx - 0.5, ey = (fy + 0.5) / sy - 0.5;   // full -> detection
+            double gx = det.At<double>(0, 0) * qx + det.At<double>(0, 1) * qy + det.At<double>(0, 2);
+            double gy = det.At<double>(1, 0) * qx + det.At<double>(1, 1) * qy + det.At<double>(1, 2);
+            Assert.Equal(ex, gx, 9);
+            Assert.Equal(ey, gy, 9);
+        }
     }
 
     [Fact] public void FullResMaskScalesTheDetectionMaskWidth()
