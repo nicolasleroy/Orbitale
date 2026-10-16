@@ -1,4 +1,5 @@
 using OpenCvSharp;
+using Orbitale.Engine.Imaging;
 
 namespace Orbitale.Engine.Trails;
 
@@ -16,7 +17,7 @@ public sealed record TrailCleanResult(Mat Cleaned, IReadOnlyList<LineSegment> Se
 public static class TrailRemover
 {
     /// <summary>The scale the prototype was validated at.</summary>
-    public const int DetectionLongSide = 2000;
+    public const int DetectionLongSide = DetectionScale.LongSide;
 
     const int Feather = 7;                  // Gaussian feather kernel at detection scale
     const double SideOffset = 8.0;          // static-line guard: background samples beside the segment, detection px
@@ -39,14 +40,11 @@ public static class TrailRemover
 
         using var median = TemporalMedian.Compute(neighbours);
 
-        int fullW = frame.Cols, fullH = frame.Rows, fullLong = Math.Max(fullW, fullH);
-        bool downscale = fullLong > DetectionLongSide;
-        var detSize = downscale
-            ? new Size((int)Math.Round((double)fullW * DetectionLongSide / fullLong), (int)Math.Round((double)fullH * DetectionLongSide / fullLong))
-            : frame.Size();
+        int fullW = frame.Cols, fullH = frame.Rows;
+        var detSize = DetectionScale.For(frame.Size());
 
-        using var frameGray = ToDetectionGray(frame, downscale, detSize);
-        using var medianGray = ToDetectionGray(median, downscale, detSize);
+        using var frameGray = DetectionScale.ToGray(frame, detSize);
+        using var medianGray = DetectionScale.ToGray(median, detSize);
         using (var detection = TrailDetector.Detect(frameGray, medianGray, s))
         {
             // Guard against static structures (a lit road, a wire, the horizon): keep only segments that are
@@ -91,20 +89,6 @@ public static class TrailRemover
             medianContrast += At(medianGray, x, y) - (At(medianGray, x + nx, y + ny) + At(medianGray, x - nx, y - ny)) / 2;
         }
         return frameContrast > 0 && medianContrast < StaticContrastRatio * frameContrast;
-    }
-
-    static Mat ToDetectionGray(Mat bgr, bool downscale, Size detSize)
-    {
-        var gray = new Mat();
-        if (!downscale)
-        {
-            Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
-            return gray;
-        }
-        using var small = new Mat();
-        Cv2.Resize(bgr, small, detSize, 0, 0, InterpolationFlags.Area);
-        Cv2.CvtColor(small, gray, ColorConversionCodes.BGR2GRAY);
-        return gray;
     }
 
     /// <summary>Mask (0/255, detection scale) to a 0..1 float weight at full size, feathered by Gaussian odd(7·scale).</summary>

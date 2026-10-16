@@ -17,30 +17,41 @@ public static class SyntheticSky
     /// </summary>
     public static List<Mat> Make(int n, int w, int h, int stars, double degPerFrame, int seed, bool landscape = true, double noise = 0.003)
     {
+        using var sky = Generate(n, w, h, stars, degPerFrame, seed, landscape, noise);
+        return sky.TakeFrames();
+    }
+
+    /// <summary>
+    /// Like <see cref="Make"/>, but also returns the star catalogue and the landscape mask so tests can find where
+    /// each star is. The shutter is open for <paramref name="exposure"/> of each interval (1 = whole interval, as in
+    /// <see cref="Make"/>; smaller values leave a gap between consecutive images of a star).
+    /// </summary>
+    public static Sky Generate(int n, int w, int h, int stars, double degPerFrame, int seed, bool landscape = true,
+                               double noise = 0.003, double exposure = 1.0)
+    {
         var rng = new Random(seed);
         double cx = w / 2.0, cy = -h / 4.0;
         // Star catalogue: radius/angle about the pole, amplitude (mostly faint), PSF sigma.
-        var catalogue = new List<(double r, double a, double amp, double sig)>();
+        var catalogue = new List<SkyStar>();
         while (catalogue.Count < stars)
         {
             double x = rng.NextDouble() * w, y = rng.NextDouble() * h;
             double dx = x - cx, dy = y - cy;
             double u = rng.NextDouble();
-            catalogue.Add((Math.Sqrt(dx * dx + dy * dy), Math.Atan2(dy, dx), 0.06 + 0.7 * u * u * u, 0.8 + 0.6 * rng.NextDouble()));
+            catalogue.Add(new SkyStar(Math.Sqrt(dx * dx + dy * dy), Math.Atan2(dy, dx), 0.06 + 0.7 * u * u * u, 0.8 + 0.6 * rng.NextDouble()));
         }
 
-        using var land = landscape ? LandscapeMask(w, h, rng) : null;
-        var frames = new List<Mat>(n);
+        var land = landscape ? LandscapeMask(w, h, rng) : null;
+        var sky = new Sky(n, cx, cy, degPerFrame * Math.PI / 180.0, exposure, catalogue, land);
         for (int f = 0; f < n; f++)
         {
             var gray = new Mat(h, w, MatType.CV_32FC1, Scalar.All(Background));
-            double step = degPerFrame * Math.PI / 180.0, rot = (f - n / 2) * step;
-            // The shutter stays open for the whole interval: each star is a short arc (sub-steps of the rotation).
-            foreach (var (r, a, amp, sig) in catalogue)
+            // The shutter stays open for `exposure` of the interval: each star is a short arc (sub-steps of the rotation).
+            foreach (var s in catalogue)
                 for (int k = 0; k < SubSteps; k++)
                 {
-                    double t = a + rot + step * k / SubSteps;
-                    Splat(gray, cx + r * Math.Cos(t), cy + r * Math.Sin(t), amp / SubSteps, sig);
+                    double t = s.A + (f - n / 2) * sky.Step + sky.Step * exposure * k / SubSteps;   // same arithmetic as before `exposure`
+                    Splat(gray, cx + s.R * Math.Cos(t), cy + s.R * Math.Sin(t), s.Amp / SubSteps, s.Sigma);
                 }
             if (land != null) gray.SetTo(Scalar.All(LandscapeLevel), land);
 
@@ -54,9 +65,9 @@ public static class SyntheticSky
                 Cv2.Randn(nz, Scalar.All(0), Scalar.All(noise));
                 Cv2.Add(frame, nz, frame);
             }
-            frames.Add(frame);
+            sky.Frames.Add(frame);
         }
-        return frames;
+        return sky;
     }
 
     /// <summary>Draws a 1 px streak of <paramref name="value"/> (all channels) on one frame; dashed = <paramref name="dash"/> px on, <paramref name="gap"/> px off.</summary>
@@ -120,5 +131,50 @@ public static class SyntheticSky
                 gray.Set(r, c, (float)Math.Min(1.0, gray.At<float>(r, c) + amp * Math.Exp(k * (dx * dx + dy * dy))));
             }
         }
+    }
+}
+
+/// <summary>A catalogue star: radius and angle about the pole, peak amplitude and PSF sigma.</summary>
+public sealed record SkyStar(double R, double A, double Amp, double Sigma);
+
+/// <summary>A generated sequence with its ground truth. Owns the frames (until taken) and the landscape mask.</summary>
+public sealed class Sky : IDisposable
+{
+    internal Sky(int n, double cx, double cy, double step, double exposure, IReadOnlyList<SkyStar> stars, Mat? land)
+    { N = n; Cx = cx; Cy = cy; Step = step; Exposure = exposure; Stars = stars; Land = land; }
+
+    public List<Mat> Frames { get; } = new();
+    public IReadOnlyList<SkyStar> Stars { get; }
+    /// <summary>255 = landscape (static ground below the ridge), or null without landscape.</summary>
+    public Mat? Land { get; }
+    public int N { get; }
+    public double Cx { get; }
+    public double Cy { get; }
+    /// <summary>Rotation per frame interval, radians.</summary>
+    public double Step { get; }
+    /// <summary>Fraction of the interval the shutter is open.</summary>
+    public double Exposure { get; }
+
+    /// <summary>Position of <paramref name="s"/> in frame <paramref name="f"/> at fraction <paramref name="u"/> (0..1) of that frame's exposure.</summary>
+    public (double X, double Y) Position(SkyStar s, double f, double u)
+    {
+        double t = s.A + (f - N / 2) * Step + Step * Exposure * u;
+        return (Cx + s.R * Math.Cos(t), Cy + s.R * Math.Sin(t));
+    }
+
+    /// <summary>Brightness-weighted centre of the star's image in frame <paramref name="f"/> (mean of the exposure sub-steps).</summary>
+    public (double X, double Y) Centre(SkyStar s, double f) => Position(s, f, 2.5 / 6);
+
+    /// <summary>Distance the star moves between consecutive frames, px.</summary>
+    public double Jump(SkyStar s) => s.R * Step;
+
+    /// <summary>Hands the frames to the caller (they are no longer disposed with the sky).</summary>
+    public List<Mat> TakeFrames() { var f = new List<Mat>(Frames); Frames.Clear(); return f; }
+
+    public void Dispose()
+    {
+        foreach (var m in Frames) m.Dispose();
+        Frames.Clear();
+        Land?.Dispose();
     }
 }
