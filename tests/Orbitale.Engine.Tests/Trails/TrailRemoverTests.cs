@@ -139,6 +139,35 @@ public class TrailRemoverTests
         Assert.True(streakAfter < streakBefore * 0.05, $"mean diff along streak {streakBefore:F3} -> {streakAfter:F3}");
     }
 
+    [Fact] public void KeepsBrightWideStarBesideTheTrail()
+    {
+        // Production scale (1/3.864). A bright, wide star (peak 0.6, PSF sigma 2 px at detection scale) in this frame
+        // only. Its above-threshold footprint has a radius of about 6 detection px, so it is centred 33 px (8.5 detection
+        // px) off the axis: any closer and it touches the trail blob and merges (accepted loss). Its inner flank lies
+        // in the full-weight corridor and must survive along with its peak.
+        var frames = SyntheticSky.Make(5, 7728, 800, 1500, 0.03, seed: 8);
+        var a = new Point(300, 100); var b = new Point(7400, 500);
+        double len = Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
+        double nx = -(b.Y - a.Y) / len, ny = (b.X - a.X) / len, mx = (a.X + b.X) / 2.0, my = (a.Y + b.Y) / 2.0;
+        int cx = (int)Math.Round(mx + 33 * nx), cy = (int)Math.Round(my + 33 * ny);   // star centre
+        int fx = (int)Math.Round(mx + 15 * nx), fy = (int)Math.Round(my + 15 * ny);   // inner flank, deep in the corridor
+        using var noStar = frames[2].Clone();
+        SyntheticSky.DrawStar(frames[2], cx, cy, 0.6, 2 * 3.864);
+        using var noStreak = frames[2].Clone();
+        SyntheticSky.DrawStreak(frames[2], a, b, 0.8, dashed: false);
+        using var r = TrailRemover.Clean(frames[2], new[] { frames[0], frames[1], frames[3], frames[4] }, new TrailSettings());
+        double Excess(Mat m, int x, int y) => m.At<Vec3f>(y, x).Item1 - noStar.At<Vec3f>(y, x).Item1;
+        double peakBefore = Excess(frames[2], cx, cy), peakAfter = Excess(r.Cleaned, cx, cy);
+        double flankBefore = Excess(frames[2], fx, fy), flankAfter = Excess(r.Cleaned, fx, fy);
+        double streakBefore = TestMasks.MeanAbsDiffAlong(frames[2], noStreak, (a.X, a.Y), (b.X, b.Y));
+        double streakAfter = TestMasks.MeanAbsDiffAlong(r.Cleaned, noStreak, (a.X, a.Y), (b.X, b.Y));
+        DisposeAll(frames);
+        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 10);
+        Assert.True(peakAfter >= 0.9 * peakBefore, $"star peak {peakBefore:F3} -> {peakAfter:F3}");
+        Assert.True(flankAfter >= 0.9 * flankBefore, $"star flank in corridor {flankBefore:F3} -> {flankAfter:F3}");
+        Assert.True(streakAfter < streakBefore * 0.05, $"mean diff along streak {streakBefore:F3} -> {streakAfter:F3}");
+    }
+
     [Fact] public void NoDetectionsReturnsUnchangedClone()
     {
         var frames = SyntheticSky.Make(5, 1200, 800, 600, 0.0, seed: 3);

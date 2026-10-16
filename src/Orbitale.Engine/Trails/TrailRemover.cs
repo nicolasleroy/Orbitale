@@ -21,7 +21,7 @@ public static class TrailRemover
     const int Feather = 7;                  // Gaussian feather kernel at detection scale
     const double SideOffset = 8.0;          // static-line guard: background samples beside the segment, detection px
     const double StaticContrastRatio = 0.5; // median contrast at or above this fraction of the frame's = static
-    const int StarMaxSide = 6;              // star blob bounding box, detection-scale px
+    const int StarMaxSide = 15;             // star blob bounding box, detection-scale px
     const double StarMaxAspect = 2.0;       // longer / shorter bbox side
     const double StarMargin = 2.0;          // protected disc = blob radius + margin, full-res px
     const double StarFeather = 2.0;         // linear fall-off beyond the disc, full-res px
@@ -129,8 +129,8 @@ public static class TrailRemover
 
     /// <summary>
     /// The neighbour median does not hold this frame's stars where they drifted, so a plain repair would erase
-    /// the stars inside the trail corridor. Finds the frame's own compact residual blobs (frame − median) under
-    /// the trail mask at detection scale and zeroes the repair weight in a feathered disc around each one.
+    /// the stars inside the trail corridor. Finds the frame's own compact residual blobs (frame − median) that
+    /// reach into the trail mask at detection scale and zeroes the repair weight in a feathered disc around each one.
     /// Elongated blobs (the trail, its dashes) stay repaired, and so do their pixels inside a star's disc.
     /// A star lying on the trail line merges with the trail blob and is not protected.
     /// </summary>
@@ -141,25 +141,35 @@ public static class TrailRemover
         float threshold = TrailDetector.RobustThreshold(residual, sigma);
         using var binary = new Mat();
         Cv2.Compare(residual, Scalar.All(threshold), binary, CmpTypes.GT);
-        Cv2.BitwiseAnd(binary, trailMask, binary);
 
+        // Blobs are measured whole (not clipped to the corridor, which would make a star at its edge look
+        // elongated); a star is a compact blob that reaches into the trail mask.
         using var labels = new Mat();
         using var stats = new Mat();
         using var centroids = new Mat();
         int n = Cv2.ConnectedComponentsWithStats(binary, labels, stats, centroids, PixelConnectivity.Connectivity8);
+        int detRows = binary.Rows, detCols = binary.Cols;
+        var inMask = new bool[n];
+        for (int r = 0; r < detRows; r++)
+        {
+            int* lab = (int*)labels.Ptr(r);
+            byte* m = (byte*)trailMask.Ptr(r);
+            for (int c = 0; c < detCols; c++)
+                if (m[c] != 0) inMask[lab[c]] = true;
+        }
         var compact = new bool[n];
         bool anyStar = false;
         for (int i = 1; i < n; i++)
         {
             int bw = stats.At<int>(i, (int)ConnectedComponentsTypes.Width), bh = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
             int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
-            anyStar |= compact[i] = area >= TrailDetector.MinBlob && bw <= StarMaxSide && bh <= StarMaxSide
-                                    && Math.Max(bw, bh) <= StarMaxAspect * Math.Min(bw, bh);
+            compact[i] = area >= TrailDetector.MinBlob && bw <= StarMaxSide && bh <= StarMaxSide
+                         && Math.Max(bw, bh) <= StarMaxAspect * Math.Min(bw, bh);
+            anyStar |= compact[i] && inMask[i];
         }
         if (!anyStar) return;
 
         // Pixels of elongated (trail) blobs, grown by 1 px: never protected, even inside a star's disc.
-        int detRows = binary.Rows, detCols = binary.Cols;
         using var trail = new Mat(detRows, detCols, MatType.CV_8UC1, Scalar.All(0));
         for (int r = 0; r < detRows; r++)
         {
@@ -175,7 +185,7 @@ public static class TrailRemover
         int fullW = weight.Cols, fullH = weight.Rows;
         for (int i = 1; i < n; i++)
         {
-            if (!compact[i]) continue;
+            if (!compact[i] || !inMask[i]) continue;
             int bw = stats.At<int>(i, (int)ConnectedComponentsTypes.Width), bh = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
             double cx = (centroids.At<double>(i, 0) + 0.5) * sx - 0.5, cy = (centroids.At<double>(i, 1) + 0.5) * sy - 0.5;
             double radius = Math.Max(bw, bh) / 2.0 * scale + StarMargin, outer = radius + StarFeather;
