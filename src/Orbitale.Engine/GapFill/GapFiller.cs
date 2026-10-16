@@ -1,4 +1,5 @@
 using OpenCvSharp;
+using Orbitale.Engine.Alignment;
 using Orbitale.Engine.Imaging;
 
 namespace Orbitale.Engine.GapFill;
@@ -10,6 +11,9 @@ namespace Orbitale.Engine.GapFill;
 /// </summary>
 public sealed class GapFiller
 {
+    const double MinDisplacement = 1;   // detection px; below this the light is static (centroid jitter of a fixed point)
+    const double MotionTolerance = 2;   // detection px; allowed deviation from the sky motion model
+
     /// <param name="strength">0..1; sets the matching radius r = 2 + 10·strength detection px (the largest gap bridged).</param>
     public GapFiller(double strength)
     {
@@ -25,8 +29,11 @@ public sealed class GapFiller
     /// where the layer holds each segment as an anti-aliased capsule of width max(1, round(1.6·mean radius)), with
     /// colour = per-channel min of the pair's colours scaled by pixel coverage. Only each segment's bounding box is
     /// touched; nothing is allocated at full resolution.
+    /// Of the <see cref="StarMatcher.Match"/> pairs, those that moved less than 1 detection px are static lights and draw
+    /// nothing; with <paramref name="prevToCur"/> (the sky motion from the previous frame to this one, full-res px), so do
+    /// those whose position differs from the one the sky motion predicts by more than 2 detection px.
     /// </summary>
-    public void Apply(Mat currentFrame, IReadOnlyList<Star> prevStars, IReadOnlyList<Star> curStars)
+    public void Apply(Mat currentFrame, IReadOnlyList<Star> prevStars, IReadOnlyList<Star> curStars, SkyWarp? prevToCur = null)
     {
         ArgumentNullException.ThrowIfNull(currentFrame);
         ArgumentNullException.ThrowIfNull(prevStars);
@@ -37,8 +44,16 @@ public sealed class GapFiller
         var size = currentFrame.Size();
         var det = DetectionScale.For(size);
         double scale = Math.Sqrt((double)size.Width / det.Width * size.Height / det.Height);
+        double minMove = MinDisplacement * scale, tolerance = MotionTolerance * scale;
         foreach (var (a, b) in StarMatcher.Match(prevStars, curStars, RadiusDetectPx, scale))
         {
+            double dx = b.X - a.X, dy = b.Y - a.Y;
+            if (dx * dx + dy * dy < minMove * minMove) continue;
+            if (prevToCur is not null)
+            {
+                var (px, py) = prevToCur.Map(a.X, a.Y);
+                if ((b.X - px) * (b.X - px) + (b.Y - py) * (b.Y - py) > tolerance * tolerance) continue;
+            }
             int thickness = Math.Max(1, (int)Math.Round(1.6 * (a.Radius + b.Radius) / 2));
             var color = new Vec3f(Math.Min(a.Color.Item0, b.Color.Item0), Math.Min(a.Color.Item1, b.Color.Item1), Math.Min(a.Color.Item2, b.Color.Item2));
             DrawMax(currentFrame, a.X, a.Y, b.X, b.Y, thickness, color);

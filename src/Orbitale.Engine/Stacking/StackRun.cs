@@ -38,6 +38,7 @@ internal sealed class StackRun
     readonly double _detScale;
 
     IReadOnlyList<Star>? _prevStars;
+    int _prevIndex = -1;             // file index of _prevStars
     int _processed, _trailsTotal;
     PreviewImage? _lastPreview;
 
@@ -59,7 +60,7 @@ internal sealed class StackRun
 
     public StackResult Run()
     {
-        var metadata = ImageMetadata.FromFile(_seq.Files[0]);
+        var metadata = ReadMetadata();
         var clock = Stopwatch.StartNew();
         var window = new FrameWindow(_seq.Files, 2 * _k + 2);
         var acc = AccumulatorFactory.Create(_s.Mode, _s.Mode == BlendMode.Lighten && _s.Comet, _s.CometStrength, _n);
@@ -68,10 +69,16 @@ internal sealed class StackRun
         {
             for (int p = 0; ; p++)
             {
-                if (_ct.IsCancellationRequested) break;
+                // All frames first: a Stop during the last frame's report still completes the run.
                 if (p == _n) { completed = true; break; }
+                if (_ct.IsCancellationRequested) break;
                 if (!ProcessFrame(p, window, acc, clock)) break;
             }
+        }
+        catch
+        {
+            acc.Dispose();   // a faulted run returns no result
+            throw;
         }
         finally
         {
@@ -95,6 +102,27 @@ internal sealed class StackRun
         }
     }
 
+    /// <summary>
+    /// The metadata (colour profile, EXIF) to save the result with: the first file's, else the first file whose metadata
+    /// reads, else none (saved without a profile). Either fallback is noticed.
+    /// </summary>
+    ImageMetadata ReadMetadata()
+    {
+        foreach (var file in _seq.Files)
+        {
+            try
+            {
+                var metadata = ImageMetadata.FromFile(file);
+                if (!ReferenceEquals(file, _seq.Files[0]))
+                    _notices.Add($"The metadata of {Path.GetFileName(_seq.Files[0])} could not be read; the result uses {Path.GetFileName(file)}'s");
+                return metadata;
+            }
+            catch (InvalidDataException) { /* try the next file */ }
+        }
+        _notices.Add("No frame's metadata could be read; the result is saved without a colour profile or EXIF");
+        return new ImageMetadata();
+    }
+
     /// <summary>Processes the frame at position <paramref name="p"/> of the run. Returns false when cancelled mid-frame.</summary>
     bool ProcessFrame(int p, FrameWindow window, IAccumulator acc, Stopwatch clock)
     {
@@ -106,6 +134,7 @@ internal sealed class StackRun
         if (frame is null)
         {
             _prevStars = null;   // never bridge a gap across a frame we could not see
+            _prevIndex = -1;
             _processed++;
             Report(i, [], _lastPreview ?? Preview.Blank(_seq.Width, _seq.Height, _s.PreviewMaxLongSide), clock);
             return true;
@@ -151,8 +180,9 @@ internal sealed class StackRun
             {
                 using var exclude = segments.Count > 0 ? TrailRemover.FullResMask(work.Size(), segments) : null;
                 var stars = StarDetector.Detect(work, exclude);
-                if (_prevStars is not null) _gapFiller.Apply(work, _prevStars, stars);
+                if (_prevStars is not null) _gapFiller.Apply(work, _prevStars, stars, GapFillMotion(_prevIndex, i, _prevStars, stars));
                 _prevStars = stars;
+                _prevIndex = i;
             }
             long t3 = Stopwatch.GetTimestamp();
             if (_ct.IsCancellationRequested) return false;
@@ -177,6 +207,22 @@ internal sealed class StackRun
             if (owned) work.Dispose();
         }
     }
+
+    /// <summary>
+    /// The sky motion from the previous processed file <paramref name="prev"/> into file <paramref name="i"/> for gap filling:
+    /// the pair's cached alignment warp when trail removal estimated it (inverted under HeadAtStart, as everywhere), else
+    /// estimated from the two frames' gap-fill stars (their brightest <see cref="AlignStarsMax"/>). Null when there is none.
+    /// </summary>
+    SkyWarp? GapFillMotion(int prev, int i, IReadOnlyList<Star> prevStars, IReadOnlyList<Star> stars)
+    {
+        if (_skyMotion.TryGetValue((Math.Min(prev, i), Math.Max(prev, i)), out var lohi))
+            return lohi is null ? null : prev < i ? lohi : lohi.Inverse();
+        return SkyAligner.EstimateWarp(Brightest(prevStars), Brightest(stars), 6 + 12 * Math.Abs(i - prev), _detScale);
+    }
+
+    static IReadOnlyList<Star> Brightest(IReadOnlyList<Star> stars) => stars.Count <= AlignStarsMax ? stars
+        : stars.OrderByDescending(st => Math.Max(st.Color.Item0, Math.Max(st.Color.Item1, st.Color.Item2))).ThenBy(st => st.Y).ThenBy(st => st.X)
+               .Take(AlignStarsMax).ToList();
 
     /// <summary>
     /// The sky motion from file <paramref name="j"/> into file <paramref name="i"/>, or null when it cannot be estimated.
@@ -249,11 +295,7 @@ internal sealed class StackRun
         var detSize = DetectionScale.For(frame.Size());
         if (frame.Size() == detSize) frame.CopyTo(detection);
         else Cv2.Resize(frame, detection, detSize, 0, 0, InterpolationFlags.Area);
-        var stars = StarDetector.Detect(frame, null, detection);
-        if (stars.Count > AlignStarsMax)
-            stars = stars.OrderByDescending(st => Math.Max(st.Color.Item0, Math.Max(st.Color.Item1, st.Color.Item2))).ThenBy(st => st.Y).ThenBy(st => st.X)
-                         .Take(AlignStarsMax).ToList();
-        return (detection, stars);
+        return (detection, Brightest(StarDetector.Detect(frame, null, detection)));
     }
 
     /// <summary>Drops the stars and pair motions that neither this frame nor the next processed one needs.</summary>

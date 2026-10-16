@@ -5,9 +5,11 @@ using Orbitale.Engine.Trails;
 namespace Orbitale.Engine.GapFill;
 
 /// <summary>
-/// A detected star in full-resolution coordinates. <see cref="Radius"/> = sqrt(area/π) of its half-maximum core (blob
-/// pixels at or above half the blob's top-hat peak), mapped to full-resolution px, so 1.6·Radius is about the star's
-/// FWHM; <see cref="Color"/> = per-channel max of the frame in the 3×3 window at the centroid.
+/// A detected star in full-resolution coordinates. <see cref="Radius"/> = the minor-axis half-width of its half-maximum
+/// core (blob pixels at or above half the blob's top-hat peak): 2·sqrt(λmin) of the core's second moments (each pixel a
+/// unit square), mapped to full-resolution px. For a round star that is sqrt(area/π) of the core, so 1.6·Radius is about
+/// the star's FWHM; for a star that trailed during the exposure (a dash) it is the dash's half-width, not its length.
+/// <see cref="Color"/> = per-channel max of the frame in the 3×3 window at the centroid.
 /// </summary>
 public readonly record struct Star(float X, float Y, float Radius, Vec3f Color);
 
@@ -56,9 +58,9 @@ public static class StarDetector
         var area = new int[n];
         for (int i = 1; i < n; i++) area[i] = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
 
-        // Top-hat-weighted centroids and half-maximum core areas. Only each kept blob's bounding box is visited.
+        // Top-hat-weighted centroids and half-maximum core radii. Only each kept blob's bounding box is visited.
         var sw = new double[n]; var swx = new double[n]; var swy = new double[n];
-        var core = new int[n];
+        var coreRadius = new double[n];
         int rows = labels.Rows, cols = labels.Cols;
         for (int i = 1; i < n; i++)
         {
@@ -78,13 +80,20 @@ public static class StarDetector
                     peak = Math.Max(peak, t[c]);
                 }
             }
+            // Second moments of the core (bounding-box-relative coordinates): its minor axis is the star's width.
+            double cn = 0, cx = 0, cy = 0, cxx = 0, cyy = 0, cxy = 0;
             for (int r = topRow; r < topRow + bh; r++)
             {
                 int* lab = (int*)labels.Ptr(r);
                 float* t = (float*)top.Ptr(r);
                 for (int c = left; c < left + bw; c++)
-                    if (lab[c] == i && t[c] >= peak / 2) core[i]++;
+                {
+                    if (lab[c] != i || t[c] < peak / 2) continue;
+                    double u = c - left, v = r - topRow;
+                    cn++; cx += u; cy += v; cxx += u * u; cyy += v * v; cxy += u * v;
+                }
             }
+            coreRadius[i] = MinorHalfWidth(cn, cx, cy, cxx, cyy, cxy);
         }
 
         int fullW = frame32f.Cols, fullH = frame32f.Rows;
@@ -96,9 +105,24 @@ public static class StarDetector
             double x = (swx[i] / sw[i] + 0.5) * sx - 0.5, y = (swy[i] / sw[i] + 0.5) * sy - 0.5;
             int px = Math.Clamp((int)Math.Round(x), 0, fullW - 1), py = Math.Clamp((int)Math.Round(y), 0, fullH - 1);
             if (excludeMask8U != null && *(byte*)excludeMask8U.Ptr(py, px) != 0) continue;
-            result.Add(new Star((float)x, (float)y, (float)(Math.Sqrt(core[i] / Math.PI) * s), MaxColor(frame32f, px, py)));
+            result.Add(new Star((float)x, (float)y, (float)(coreRadius[i] * s), MaxColor(frame32f, px, py)));
         }
         return result;
+    }
+
+    /// <summary>
+    /// 2·sqrt(λmin) of the pixel set with count <paramref name="n"/> and coordinate sums Σx, Σy, Σx², Σy², Σxy, each pixel a
+    /// unit square (variance 1/12 per axis added). A uniform disk of radius r has λ = r²/4, so a round core gives its
+    /// equivalent radius sqrt(area/π); an elongated core gives its minor-axis half-width.
+    /// </summary>
+    internal static double MinorHalfWidth(double n, double sx, double sy, double sxx, double syy, double sxy)
+    {
+        if (n <= 0) return 0;
+        double mx = sx / n, my = sy / n;
+        double vxx = sxx / n - mx * mx + 1.0 / 12, vyy = syy / n - my * my + 1.0 / 12, vxy = sxy / n - mx * my;
+        double half = (vxx + vyy) / 2, diff = (vxx - vyy) / 2;
+        double lmin = half - Math.Sqrt(diff * diff + vxy * vxy);
+        return 2 * Math.Sqrt(Math.Max(lmin, 1.0 / 12));
     }
 
     /// <summary>Per-channel max of the 3×3 window around (x, y), clipped to the frame.</summary>

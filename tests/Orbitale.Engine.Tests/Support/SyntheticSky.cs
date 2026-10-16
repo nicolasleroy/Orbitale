@@ -73,6 +73,29 @@ public static class SyntheticSky
         return sky;
     }
 
+    /// <summary>
+    /// Adds a horizon glow to the sky (not the landscape) of each frame: a vertical ramp from 0 at 40 % of the height to
+    /// <paramref name="amp"/> at 80 %, whose brightness drifts by ±<paramref name="variation"/> (relative) over the
+    /// sequence, as light pollution does during a night.
+    /// </summary>
+    public static void AddGlow(IList<Mat> frames, Mat? land, double amp, double variation)
+    {
+        int h = frames[0].Rows, w = frames[0].Cols;
+        double top = 0.4 * h, bottom = 0.8 * h;
+        for (int f = 0; f < frames.Count; f++)
+        {
+            double k = 1 + variation * Math.Sin(2 * Math.PI * f / Math.Max(1, frames.Count - 1));
+            using var glow = new Mat(h, w, MatType.CV_32FC3, Scalar.All(0));
+            for (int y = (int)top; y < h; y++)
+            {
+                using var row = new Mat(glow, new Rect(0, y, w, 1));
+                row.SetTo(Scalar.All(amp * k * Math.Min(1, (y - top) / (bottom - top))));
+            }
+            if (land != null) glow.SetTo(Scalar.All(0), land);
+            Cv2.Add(frames[f], glow, frames[f]);
+        }
+    }
+
     /// <summary>Draws a 1 px streak of <paramref name="value"/> (all channels) on one frame; dashed = <paramref name="dash"/> px on, <paramref name="gap"/> px off.</summary>
     public static void DrawStreak(Mat m, Point a, Point b, double value, bool dashed, int dash = 30, int gap = 15)
     {
@@ -108,6 +131,32 @@ public static class SyntheticSky
         var mask = new Mat(h, w, MatType.CV_8UC1, Scalar.All(0));
         Cv2.FillPoly(mask, new[] { pts }, Scalar.All(255));
         return mask;
+    }
+
+    /// <summary>
+    /// Adds a dash, the image of a star trailing during the exposure, to every channel: a Gaussian PSF of sigma
+    /// <paramref name="sig"/> swept from (x0, y0) to (x1, y1), with a peak of about <paramref name="peak"/> along its middle.
+    /// </summary>
+    public static void DrawDash(Mat m, double x0, double y0, double x1, double y1, double peak, double sig)
+    {
+        double len = Math.Sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+        int steps = Math.Max(1, (int)Math.Ceiling(len / 0.25));
+        double amp = peak * (len / steps) / (sig * Math.Sqrt(2 * Math.PI));   // a line of splats integrates to `peak`
+        var planes = m.Split();
+        foreach (var p in planes)
+            for (int k = 0; k <= steps; k++) Splat(p, x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps, amp, sig);
+        Cv2.Merge(planes, m);
+        foreach (var p in planes) p.Dispose();
+    }
+
+    /// <summary>The true sky motion of <paramref name="sky"/> from frame <paramref name="from"/> to <paramref name="to"/> as a warp (no lens distortion).</summary>
+    public static Orbitale.Engine.Alignment.SkyWarp Motion(Sky sky, int from, int to)
+    {
+        double t = (to - from) * sky.Step, c = Math.Cos(t), s = Math.Sin(t);
+        using var a = new Mat(2, 3, MatType.CV_64FC1);
+        a.Set(0, 0, c); a.Set(0, 1, -s); a.Set(0, 2, sky.Cx - c * sky.Cx + s * sky.Cy);
+        a.Set(1, 0, s); a.Set(1, 1, c); a.Set(1, 2, sky.Cy - s * sky.Cx - c * sky.Cy);
+        return Orbitale.Engine.Alignment.SkyWarp.FromAffine(a);
     }
 
     /// <summary>Adds a Gaussian star of peak <paramref name="amp"/> and PSF sigma <paramref name="sig"/> at (x, y), to every channel.</summary>

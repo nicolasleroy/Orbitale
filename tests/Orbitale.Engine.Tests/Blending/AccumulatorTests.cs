@@ -1,10 +1,11 @@
 using OpenCvSharp;
 using Orbitale.Engine.Blending;
 using Orbitale.Engine.Tests.Support;
+using Xunit.Abstractions;
 
 namespace Orbitale.Engine.Tests.Blending;
 
-public class AccumulatorTests
+public class AccumulatorTests(ITestOutputHelper output)
 {
     static Mat Const(float v) => new(4, 5, MatType.CV_32FC3, Scalar.All(v));
 
@@ -82,15 +83,39 @@ public class AccumulatorTests
       Assert.True(Cv2.Norm(comet.Current[land], light.Current[land], NormTypes.INF) < 1e-4);
       foreach (var f in frames) f.Dispose(); }
 
-    [Fact] public void CometDoesNotDarkenNoisyLandscape()   // spec anti-goal: landscape must not get darker
-    { var frames = SyntheticSky.Make(40, 400, 300, 150, 0.4, seed: 3);
+    [Fact] public void CometLandscapeMatchesLighten()   // spec anti-goal: the comet must not darken landscape or glow
+    { // Default noise plus a horizon glow whose brightness drifts by +-20 % over the night. The pixels any star trail
+      // touches (from the same sky without noise or glow) are left out of the glow region: the comet fades those on purpose.
+      using var sky = SyntheticSky.Generate(40, 400, 300, 150, 0.4, seed: 3);
+      SyntheticSky.AddGlow(sky.Frames, sky.Land, 0.1, 0.2);
+      using var clean = SyntheticSky.Generate(40, 400, 300, 150, 0.4, seed: 3, noise: 0);
+      using var trails = new Mat(300, 400, MatType.CV_8UC1, Scalar.All(0));
+      foreach (var f in clean.Frames)
+      { using var g = new Mat(); Cv2.CvtColor(f, g, ColorConversionCodes.BGR2GRAY);
+        using var lit = new Mat(); Cv2.Compare(g, Scalar.All(0.05 + 0.002), lit, CmpTypes.GT);
+        Cv2.BitwiseOr(trails, lit, trails); }
+      using (var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(5, 5))) Cv2.Dilate(trails, trails, k);
       using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 0.5, 40);
-      using var avg = AccumulatorFactory.Create(BlendMode.Average, false, 0, 40);
-      foreach (var f in frames) { comet.Add(f); avg.Add(f); }
-      var land = new Rect(0, 246, 400, 54);
-      double cometMean = Cv2.Mean(comet.Current[land]).Val0, avgMean = Cv2.Mean(avg.Current[land]).Val0;
-      Assert.True(cometMean >= avgMean, $"comet {cometMean} < average {avgMean}");
-      foreach (var f in frames) f.Dispose(); }
+      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 40);
+      foreach (var f in sky.Frames) { comet.Add(f); light.Add(f); }
+
+      var land = new Rect(0, 246, 400, 54);                    // bottom 18 %: safely inside the static band
+      using var glow = new Mat(300, 400, MatType.CV_8UC1, Scalar.All(0));
+      glow[new Rect(0, 165, 400, 36)].SetTo(Scalar.All(255));  // 55..67 % of the height: the glow above the ridge
+      glow.SetTo(Scalar.All(0), trails);
+      Assert.True(Cv2.CountNonZero(glow) > 2000, $"only {Cv2.CountNonZero(glow)} star-free glow px");
+      double cl = Cv2.Mean(comet.Current[land]).Val0, ll = Cv2.Mean(light.Current[land]).Val0;
+      double cg = Cv2.Mean(comet.Current, glow).Val0, lg = Cv2.Mean(light.Current, glow).Val0;
+      output.WriteLine($"landscape comet {cl:F5} lighten {ll:F5} ({cl / ll - 1:P2}); glow comet {cg:F5} lighten {lg:F5} ({cg / lg - 1:P2})");
+      Assert.True(Math.Abs(cl / ll - 1) <= 0.01, $"landscape: comet {cl:F5} vs lighten {ll:F5}");
+      Assert.True(Math.Abs(cg / lg - 1) <= 0.01, $"glow: comet {cg:F5} vs lighten {lg:F5}");
+      // ...while the star trails still fade: over the trail pixels of the upper sky (no glow), the comet keeps well
+      // under the Lighten trail light above the sky background.
+      using var upper = new Mat(300, 400, MatType.CV_8UC1, Scalar.All(0));
+      trails[new Rect(0, 0, 400, 110)].CopyTo(upper[new Rect(0, 0, 400, 110)]);
+      double ct = Cv2.Mean(comet.Current, upper).Val0 - 0.05, lt = Cv2.Mean(light.Current, upper).Val0 - 0.05;
+      output.WriteLine($"trail light above the sky: comet {ct:F5} lighten {lt:F5} ({ct / lt:P0})");
+      Assert.True(ct < 0.7 * lt, $"trails do not fade: comet {ct:F5} vs lighten {lt:F5}"); }
 
     [Fact] public void CometTailFadesOlderPositions()
     { // one star moving 1 px/frame along x for 50 frames, strength 0.5 (T = 28, d = 0.01^(1/28))
