@@ -75,6 +75,8 @@ public sealed class FrameSequence
                 if (c != 0) return c;
             }
         }
-        return (a.Length - i).CompareTo(b.Length - j);
+        int rest = (a.Length - i).CompareTo(b.Length - j);
+        // Deterministic tie-break ("a" vs "A", "IMG_01" vs "IMG_1"): List.Sort is unstable.
+        return rest != 0 ? rest : string.CompareOrdinal(a, b);
     }
 }

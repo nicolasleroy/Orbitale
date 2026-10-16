@@ -1,3 +1,4 @@
+using OpenCvSharp;
 using Orbitale.Engine.Frames;
 
 namespace Orbitale.Engine.Tests.Frames;
@@ -49,11 +50,25 @@ public class FrameWindowTests
         Assert.True(a.IsDisposed);
     }
 
-    [Fact] public void DisposeDuringPrefetchDoesNotThrow()
+    [Fact] public void PrefetchCompletingAfterDisposeDisposesItsMat()
     {
-        var w = new FrameWindow(Samples3, 4);
+        using var started = new ManualResetEventSlim();
+        using var gate = new ManualResetEventSlim();
+        Mat? produced = null;
+        Mat Decode(string _)
+        {
+            started.Set();
+            Assert.True(gate.Wait(TimeSpan.FromSeconds(10)));
+            return produced = new Mat(2, 2, MatType.CV_32FC3);
+        }
+        var w = new FrameWindow(Samples3, 4, Decode);
         w.Prefetch(1);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10)));
+        var pending = w.PendingPrefetch!;
         w.Dispose();
-        Thread.Sleep(500); // let the background decode finish and self-dispose
+        gate.Set();
+        Assert.True(pending.Wait(TimeSpan.FromSeconds(10)));
+        Assert.NotNull(produced);
+        Assert.True(produced!.IsDisposed);
     }
 }

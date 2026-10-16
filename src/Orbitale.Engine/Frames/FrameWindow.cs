@@ -11,6 +11,7 @@ public sealed class FrameWindow : IDisposable
 {
     readonly IReadOnlyList<string> _files;
     readonly int _capacity;
+    readonly Func<string, Mat> _decode;
     readonly object _gate = new();
     readonly Dictionary<int, Mat> _cache = new();
     readonly LinkedList<int> _lru = new(); // first = least recently used
@@ -19,12 +20,18 @@ public sealed class FrameWindow : IDisposable
     Task? _pending;
     bool _disposed;
 
-    public FrameWindow(IReadOnlyList<string> files, int capacity)
+    public FrameWindow(IReadOnlyList<string> files, int capacity) : this(files, capacity, ImageReader.Read) { }
+
+    internal FrameWindow(IReadOnlyList<string> files, int capacity, Func<string, Mat> decode)
     {
+        _decode = decode;
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         _files = files;
         _capacity = capacity;
     }
+
+    /// <summary>Test hook: the in-flight (or last) prefetch task.</summary>
+    internal Task? PendingPrefetch { get { lock (_gate) return _pending; } }
 
     public Mat Get(int index)
     {
@@ -49,7 +56,7 @@ public sealed class FrameWindow : IDisposable
             }
         }
 
-        var mat = ImageReader.Read(_files[index]);
+        var mat = _decode(_files[index]);
         lock (_gate)
         {
             if (_disposed) { mat.Dispose(); throw new ObjectDisposedException(nameof(FrameWindow)); }
@@ -76,7 +83,7 @@ public sealed class FrameWindow : IDisposable
     void PrefetchWorker(int index)
     {
         Mat? mat = null;
-        try { mat = ImageReader.Read(_files[index]); }
+        try { mat = _decode(_files[index]); }
         catch { /* a failed prefetch is retried by Get on the caller's thread */ }
 
         lock (_gate)

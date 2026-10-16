@@ -52,4 +52,67 @@ public class FrameSequenceTests
         var ex = Assert.Throws<InvalidOperationException>(() => FrameSequence.Build(new[] { bad }));
         Assert.Equal("No readable frames", ex.Message);
     }
+
+    static void WriteResized(string path, int sample, int w, int h)
+    {
+        using var big = Cv2.ImRead(Sample(sample));
+        using var small = big.Resize(new Size(w, h));
+        Cv2.ImWrite(path, small);
+    }
+
+    [Fact] public void CorruptFirstFileDoesNotDefineReferenceSize()
+    {
+        var d = TempDirWithCopies(("1_a.jpg", 1), ("2_b.jpg", 2));
+        File.WriteAllBytes(Path.Combine(d, "0_bad.jpg"), new byte[] { 9, 8, 7, 6, 5, 4 });
+        var seq = FrameSequence.Build(Directory.GetFiles(d));
+        Assert.Equal((2000, 1333), (seq.Width, seq.Height));
+        Assert.Equal(new[] { "1_a.jpg", "2_b.jpg" }, seq.Files.Select(Path.GetFileName));
+        var s = Assert.Single(seq.Skipped);
+        Assert.EndsWith("0_bad.jpg", s.Path);
+        Assert.StartsWith("unreadable", s.Reason);
+    }
+
+    [Fact] public void MultipleMismatchedFilesAreAllSkipped()
+    {
+        var d = TempDirWithCopies(("a.jpg", 1), ("b.jpg", 2));
+        WriteResized(Path.Combine(d, "c.jpg"), 3, 1000, 667);
+        WriteResized(Path.Combine(d, "d.jpg"), 3, 800, 533);
+        var seq = FrameSequence.Build(Directory.GetFiles(d));
+        Assert.Equal(2, seq.Files.Count);
+        Assert.Equal(2, seq.Skipped.Count);
+        Assert.Contains(seq.Skipped, s => s.Path.EndsWith("c.jpg") && s.Reason == "size 1000×667 differs from 2000×1333");
+        Assert.Contains(seq.Skipped, s => s.Path.EndsWith("d.jpg") && s.Reason == "size 800×533 differs from 2000×1333");
+    }
+
+    [Fact] public void LeadingZerosSortDeterministicallyRegardlessOfInputOrder()
+    {
+        var names = new[] { "IMG_2.jpg", "IMG_01.jpg", "IMG_1.jpg" };
+        var expected = names.OrderBy(n => n, Comparer<string>.Create(FrameSequence.NaturalCompare)).ToArray();
+        Assert.Equal(new[] { "IMG_01.jpg", "IMG_1.jpg", "IMG_2.jpg" }, expected);
+        foreach (var perm in Permutations(names))
+        {
+            var l = perm.ToList(); l.Sort(FrameSequence.NaturalCompare);
+            Assert.Equal(expected, l);
+        }
+    }
+
+    [Fact] public void CaseOnlyDifferencesSortDeterministically()
+    {
+        var names = new[] { "a.jpg", "A.jpg" };
+        foreach (var perm in Permutations(names))
+        {
+            var l = perm.ToList(); l.Sort(FrameSequence.NaturalCompare);
+            Assert.Equal(new[] { "A.jpg", "a.jpg" }, l);
+        }
+    }
+
+    static IEnumerable<string[]> Permutations(string[] a)
+    {
+        if (a.Length <= 1) { yield return a; yield break; }
+        for (int i = 0; i < a.Length; i++)
+        {
+            var rest = a.Where((_, k) => k != i).ToArray();
+            foreach (var p in Permutations(rest)) yield return p.Prepend(a[i]).ToArray();
+        }
+    }
 }
