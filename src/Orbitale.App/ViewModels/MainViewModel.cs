@@ -48,6 +48,11 @@ public partial class MainViewModel : ObservableObject
     FrameItem? _requestedFrame;
     bool _loadingFrame;
 
+    // Closing the window: whether the result was saved since its run ended, and a close waiting for the save in flight.
+    bool _resultSaved = true;
+    bool _closeAfterSave;
+    bool _progressFailed;
+
     public MainViewModel(IFilePickers pickers, IImageSurface surface, IUiDispatcher ui, StackSession session, AppSettings settings)
     {
         _pickers = pickers;
@@ -208,7 +213,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanEditFrames))]
     async Task AddFramesAsync()
     {
-        var folder = await _pickers.PickFolderAsync();
+        var folder = await PickAsync(() => _pickers.PickFolderAsync(LastInputFolder), "Could not open the folder picker");
         if (folder is null) return;
         await AddFolderAsync(folder);
     }
@@ -216,8 +221,8 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanEditFrames))]
     async Task AddFrameFilesAsync()
     {
-        var files = await _pickers.PickFramesAsync();
-        if (files.Count == 0) return;
+        var files = await PickAsync(() => _pickers.PickFramesAsync(LastInputFolder), "Could not open the file picker");
+        if (files is null || files.Count == 0) return;
         LastInputFolder = Path.GetDirectoryName(files[0]);
         await RebuildAsync(Frames.Select(f => f.Path).Concat(files));
     }
@@ -255,7 +260,7 @@ public partial class MainViewModel : ObservableObject
         await RebuildAsync(Frames.Select(f => f.Path).Where(p => !removed.Contains(p)));
     }
 
-    bool CanStart() => RunGate.CanStart(_session.State, _sequence is not null, IsLoadingFrames, IsSaving || IsRenderingResult);
+    bool CanStart() => RunGate.CanStart(_session.State, _sequence is not null, IsLoadingFrames, IsSaving || IsRenderingResult, _loadingFrame);
 
     /// <summary>
     /// Runs the stack from the first frame. Progress is coalesced (latest preview wins, every frame's state change is
@@ -275,6 +280,7 @@ public partial class MainViewModel : ObservableObject
         _tracker.Reset();
         _lastProgress = null;
         _notices.Clear();
+        _progressFailed = false;
         ShowNotice = false;
         ShowMessage = false;
         ProgressPercent = 0;
@@ -325,7 +331,7 @@ public partial class MainViewModel : ObservableObject
     async Task SaveAsync()
     {
         var name = RunText.DefaultSaveName((_runSequence ?? _sequence)?.Files.FirstOrDefault(), LastOutputFormat);
-        var path = await _pickers.PickSaveFileAsync(name, LastOutputFormat);
+        var path = await PickAsync(() => _pickers.PickSaveFileAsync(name, LastOutputFormat, LastOutputFolder), "Could not open the save dialog");
         // The picker is modal but the state may have changed meanwhile: re-check before touching the result.
         if (path is null || !CanSave() || _session.Result is not { } result) return;
         LastOutputFolder = Path.GetDirectoryName(path);
@@ -341,6 +347,7 @@ public partial class MainViewModel : ObservableObject
         {
             await Task.Run(() => result.Save(path));
             Diagnostics.Log($"Saved {path} in {clock.ElapsedMilliseconds} ms");
+            _resultSaved = true;
             MessageIsError = false;
             MessageTitle = "Saved";
             MessageText = path;
@@ -355,6 +362,50 @@ public partial class MainViewModel : ObservableObject
         {
             StatusText = status;
             IsSaving = false;
+            if (_closeAfterSave)
+            {
+                _closeAfterSave = false;
+                SaveEnded?.Invoke();
+            }
+        }
+    }
+
+    // ---- Closing the window ----
+
+    /// <summary>A result exists that was never saved since its run ended.</summary>
+    public bool HasUnsavedResult => _session.Result is not null && !_resultSaved;
+
+    /// <summary>What closing the window does now (see <see cref="RunGate.OnClose"/>).</summary>
+    public CloseAction CloseAction => RunGate.OnClose(_session.State, IsSaving, HasUnsavedResult);
+
+    /// <summary>Raised on the UI thread when a save that a close waits for has ended (successfully or not).</summary>
+    public event Action? SaveEnded;
+
+    /// <summary>The window waits for the save in flight before closing: say so, and raise <see cref="SaveEnded"/> when it ends.</summary>
+    public void CloseWhenSaved()
+    {
+        _closeAfterSave = true;
+        StatusText = RunText.FinishingSave;
+    }
+
+    /// <summary>Stops the run, if any, before the window closes.</summary>
+    public void StopForClose()
+    {
+        if (CanStop()) Stop();
+    }
+
+    /// <summary>Runs a file dialog; a failure to open it is logged and shown, never thrown. Null when it failed.</summary>
+    async Task<T?> PickAsync<T>(Func<Task<T>> pick, string title)
+    {
+        try
+        {
+            return await pick();
+        }
+        catch (Exception e)
+        {
+            Diagnostics.Log($"{title}: {e}");
+            ShowError(title, e.Message);
+            return default;
         }
     }
 
@@ -369,7 +420,9 @@ public partial class MainViewModel : ObservableObject
         if (_loadingFrame) return;   // the running load picks up the latest request when it ends
 
         // One decode at a time (a 40 MP frame is ~0.5 GB as float): clicks while loading only keep the latest frame.
+        // Start waits for it, for the same reason.
         _loadingFrame = true;
+        StartCommand.NotifyCanExecuteChanged();
         try
         {
             while (_requestedFrame is { } next)
@@ -402,6 +455,7 @@ public partial class MainViewModel : ObservableObject
         finally
         {
             _loadingFrame = false;
+            StartCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -429,8 +483,26 @@ public partial class MainViewModel : ObservableObject
 
     // ---- Internals ----
 
-    /// <summary>Applies coalesced progress on the UI thread: every frame's state, then the latest preview.</summary>
+    /// <summary>
+    /// Applies coalesced progress on the UI thread: every frame's state, then the latest preview. It runs from the
+    /// dispatcher queue, where an exception would end the app mid-run: a failure is logged and shown once per run instead.
+    /// </summary>
     void ApplyProgress(IReadOnlyList<FrameStep> steps, StackProgress latest)
+    {
+        try
+        {
+            ApplyProgressCore(steps, latest);
+        }
+        catch (Exception e)
+        {
+            if (_progressFailed) return;
+            _progressFailed = true;
+            Diagnostics.Log($"Progress display failed: {e}");
+            ShowError("The live view failed", $"{e.Message} The run goes on; the result is shown when it ends.");
+        }
+    }
+
+    void ApplyProgressCore(IReadOnlyList<FrameStep> steps, StackProgress latest)
     {
         if (_tracker is null || _runSequence is null) return;
         IFrameStatus? current = null;
@@ -467,8 +539,12 @@ public partial class MainViewModel : ObservableObject
             _stopRequested = 0;
         }
         else Diagnostics.Log($"Run finished: {result.FramesProcessed} frames");
+        _resultSaved = false;
+        if (result.TrailRemovalSkipped > 0) Diagnostics.Log($"Trail removal skipped on {result.TrailRemovalSkipped} frames: sky alignment failed");
         int trails = _lastProgress?.TrailsTotal ?? 0;
-        StatusText = result.Completed ? RunText.Finished(result.FramesProcessed, trails) : RunText.Stopped(result.FramesProcessed, seq.Files.Count);
+        StatusText = result.Completed
+            ? RunText.Finished(result.FramesProcessed, trails, result.TrailRemovalSkipped)
+            : RunText.Stopped(result.FramesProcessed, seq.Files.Count, result.TrailRemovalSkipped);
         ProgressPercent = RunText.Percent(result.FramesProcessed, seq.Files.Count);
         await ShowResultAsync();
     }

@@ -15,15 +15,46 @@ public sealed class RunGateTests
     [InlineData(SessionState.Running, false)]
     [InlineData(SessionState.Stopping, false)]
     public void Start_follows_the_session_state(SessionState state, bool expected) =>
-        Assert.Equal(expected, RunGate.CanStart(state, hasFrames: true, loadingFrames: false, resultBusy: false));
+        Assert.Equal(expected, RunGate.CanStart(state, hasFrames: true, loadingFrames: false, resultBusy: false, frameDecoding: false));
 
     [Fact]
     public void Start_needs_frames_and_waits_for_loading_and_for_any_use_of_the_result()
     {
-        Assert.False(RunGate.CanStart(SessionState.Idle, hasFrames: false, loadingFrames: false, resultBusy: false));
-        Assert.False(RunGate.CanStart(SessionState.Idle, hasFrames: true, loadingFrames: true, resultBusy: false));
+        Assert.False(RunGate.CanStart(SessionState.Idle, hasFrames: false, loadingFrames: false, resultBusy: false, frameDecoding: false));
+        Assert.False(RunGate.CanStart(SessionState.Idle, hasFrames: true, loadingFrames: true, resultBusy: false, frameDecoding: false));
         // Start disposes the previous result: never while it is being saved or rendered.
-        Assert.False(RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: true));
+        Assert.False(RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: true, frameDecoding: false));
+    }
+
+    [Fact]
+    public void Start_waits_for_an_original_frame_being_decoded()
+    {
+        // A 40 MP frame decodes to ~0.5 GB as float: starting a run meanwhile would push the peak past 8 GB.
+        Assert.False(RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: false, frameDecoding: true));
+        Assert.False(RunGate.CanStart(SessionState.Idle, hasFrames: true, loadingFrames: false, resultBusy: false, frameDecoding: true));
+    }
+
+    [Theory]
+    [InlineData(SessionState.Idle, false, false, CloseAction.Close)]
+    [InlineData(SessionState.Finished, false, false, CloseAction.Close)]       // the result was saved
+    [InlineData(SessionState.Stopped, false, false, CloseAction.Close)]
+    [InlineData(SessionState.Finished, true, false, CloseAction.WaitForSave)]  // never lose the file being written
+    [InlineData(SessionState.Finished, true, true, CloseAction.WaitForSave)]
+    [InlineData(SessionState.Running, false, false, CloseAction.ConfirmStopRun)]
+    [InlineData(SessionState.Stopping, false, false, CloseAction.ConfirmStopRun)]
+    [InlineData(SessionState.Finished, false, true, CloseAction.ConfirmDiscardResult)]
+    [InlineData(SessionState.Stopped, false, true, CloseAction.ConfirmDiscardResult)]
+    public void Closing_the_window(SessionState state, bool saving, bool unsavedResult, CloseAction expected) =>
+        Assert.Equal(expected, RunGate.OnClose(state, saving, unsavedResult));
+
+    [Fact]
+    public void Close_prompts_have_their_texts()
+    {
+        Assert.Equal("Stop the run and close?", RunText.ClosePrompt(CloseAction.ConfirmStopRun));
+        Assert.Equal("Close without saving the result?", RunText.ClosePrompt(CloseAction.ConfirmDiscardResult));
+        Assert.Null(RunText.ClosePrompt(CloseAction.Close));
+        Assert.Null(RunText.ClosePrompt(CloseAction.WaitForSave));
+        Assert.StartsWith("Finishing save", RunText.FinishingSave);
     }
 
     [Theory]
@@ -74,6 +105,7 @@ public sealed class RunTextTests
         Assert.Equal("2 / 279 · 0 trails removed · ~1 h 5 min left", RunText.Status(Progress(2, 279, 0, TimeSpan.FromMinutes(65))));
         Assert.Equal("279 / 279 · 3 trails removed", RunText.Status(Progress(279, 279, 3, TimeSpan.Zero)));
         Assert.Equal("5 / 9 · 3 trails removed", RunText.Status(Progress(5, 9, 3, null)));
+        Assert.Equal("5 / 9 · 3 trails removed · 2 skipped (no sky alignment)", RunText.Status(Progress(5, 9, 3, null) with { TrailRemovalSkipped = 2 }));
     }
 
     [Fact]
@@ -82,6 +114,11 @@ public sealed class RunTextTests
         Assert.Equal("Done · 279 frames · 412 trails removed", RunText.Finished(279, 412));
         Assert.Equal("Done · 1 frame · 1 trail removed", RunText.Finished(1, 1));
         Assert.Equal("Stopped at 141 / 279 · result kept", RunText.Stopped(141, 279));
+        Assert.Equal("Done · 279 frames · 412 trails removed", RunText.Finished(279, 412, trailRemovalSkipped: 0));
+        Assert.Equal("Done · 279 frames · 412 trails removed · trail removal skipped on 3 frames (sky alignment failed)",
+            RunText.Finished(279, 412, trailRemovalSkipped: 3));
+        Assert.Equal("Stopped at 141 / 279 · result kept · trail removal skipped on 1 frame (sky alignment failed)",
+            RunText.Stopped(141, 279, trailRemovalSkipped: 1));
     }
 
     [Fact]
@@ -141,7 +178,18 @@ public sealed class StackSettingsMapperTests
         Assert.False(s.GapFill);
         Assert.Equal(mode, s.Mode);
         Assert.Equal(0.3, s.CometStrength);   // strengths are remembered
-        Assert.True(s.HeadAtStart);
+        Assert.False(s.HeadAtStart);          // no comet, so no head to place
+    }
+
+    [Theory]
+    [InlineData(BlendMode.Lighten)]
+    [InlineData(BlendMode.Darken)]
+    public void Head_at_start_is_off_when_the_comet_is_off(BlendMode mode)
+    {
+        // HeadAtStart only places the comet head: without a comet the run keeps file order.
+        var s = StackSettingsMapper.ForRun(new StackSettings(mode, Comet: false, HeadAtStart: true));
+        Assert.False(s.HeadAtStart);
+        Assert.True(StackSettingsMapper.ForRun(new StackSettings(BlendMode.Lighten, Comet: true, HeadAtStart: true)).HeadAtStart);
     }
 
     [Fact]
@@ -168,7 +216,7 @@ public sealed class ResultReadersTests
     public void Start_stays_blocked_until_every_overlapping_render_has_finished()
     {
         var readers = new ResultReaders();
-        bool CanStart() => RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: readers.InUse);
+        bool CanStart() => RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: readers.InUse, frameDecoding: false);
 
         readers.Begin();   // render #1, at the end of the run
         readers.Begin();   // render #2, "Back to result" after viewing a frame

@@ -8,9 +8,8 @@ using Orbitale.Engine.Imaging;
 using Orbitale.Engine.Settings;
 using Orbitale.Engine.Stacking;
 using Orbitale.Engine.Trails;
-using Windows.Storage.Pickers;
+using Microsoft.Windows.Storage.Pickers;
 using Windows.System;
-using WinRT.Interop;
 
 namespace Orbitale.App;
 
@@ -26,6 +25,8 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Orbitale.ico"));
         AppWindow.TitleBar.PreferredTheme = TitleBarTheme.Dark;
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1400, 900));
+        AppWindow.Closing += AppWindow_Closing;
+        ViewModel.SaveEnded += () => _ = TryCloseAsync();
         Closed += (_, _) => SettingsStore.Save(ViewModel.ToAppSettings());
 
         // A folder on the command line is added at startup ("Orbitale.exe D:\frames").
@@ -36,7 +37,61 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
 
     public MainViewModel ViewModel { get; }
 
-    nint Hwnd => WindowNative.GetWindowHandle(this);
+    // ---- Closing ----
+
+    bool _closeConfirmed, _closeDialogOpen;
+
+    /// <summary>
+    /// A save in flight is finished before the window closes (closing would lose the file and leave its temporary file
+    /// behind); a run in progress or a result never saved is confirmed first.
+    /// </summary>
+    void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_closeConfirmed || ViewModel.CloseAction == CloseAction.Close) return;
+        args.Cancel = true;
+        _ = TryCloseAsync();
+    }
+
+    async Task TryCloseAsync()
+    {
+        if (_closeDialogOpen) return;
+        try
+        {
+            var action = ViewModel.CloseAction;
+            switch (action)
+            {
+                case CloseAction.Close:
+                    break;
+                case CloseAction.WaitForSave:
+                    ViewModel.CloseWhenSaved();   // SaveEnded calls back here
+                    return;
+                default:
+                    _closeDialogOpen = true;
+                    var dialog = new ContentDialog
+                    {
+                        XamlRoot = Content.XamlRoot,
+                        Title = RunText.ClosePrompt(action),
+                        PrimaryButtonText = action == CloseAction.ConfirmStopRun ? "Stop and close" : "Close without saving",
+                        CloseButtonText = "Cancel",
+                        DefaultButton = ContentDialogButton.Close,
+                    };
+                    var answer = await dialog.ShowAsync();
+                    _closeDialogOpen = false;
+                    if (answer != ContentDialogResult.Primary) return;
+                    // The state may have moved on while the dialog was open (a save started, the run ended): ask again.
+                    if (ViewModel.CloseAction is CloseAction.WaitForSave) { ViewModel.CloseWhenSaved(); return; }
+                    if (action == CloseAction.ConfirmStopRun) ViewModel.StopForClose();
+                    break;
+            }
+            _closeConfirmed = true;
+            Close();
+        }
+        catch (Exception e)
+        {
+            _closeDialogOpen = false;
+            Diagnostics.Log($"Close failed: {e}");
+        }
+    }
 
     // ---- Thumbnail strip ----
 
@@ -88,46 +143,49 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
 
     public void BringIntoView(object frame) => Strip.ScrollIntoView(frame);
 
-    // ---- IFilePickers (unpackaged: every picker needs the window handle) ----
+    // ---- IFilePickers (Windows App SDK pickers: they take the window id and open in the remembered folder) ----
 
-    public async Task<string?> PickFolderAsync()
+    /// <summary>The remembered folder, when it still exists (a missing one would make the picker fail).</summary>
+    static string? Existing(string? folder) => !string.IsNullOrEmpty(folder) && Directory.Exists(folder) ? folder : null;
+
+    public async Task<string?> PickFolderAsync(string? suggestedFolder)
     {
-        var picker = new FolderPicker { SettingsIdentifier = "frames", SuggestedStartLocation = PickerLocationId.PicturesLibrary };
-        picker.FileTypeFilter.Add("*");
-        InitializeWithWindow.Initialize(picker, Hwnd);
-        var folder = await picker.PickSingleFolderAsync();
-        return folder?.Path;
+        var picker = new FolderPicker(AppWindow.Id) { SettingsIdentifier = "frames", SuggestedStartLocation = PickerLocationId.PicturesLibrary };
+        if (Existing(suggestedFolder) is { } folder) picker.SuggestedFolder = folder;
+        var result = await picker.PickSingleFolderAsync();
+        return result?.Path;
     }
 
-    public async Task<IReadOnlyList<string>> PickFramesAsync()
+    public async Task<IReadOnlyList<string>> PickFramesAsync(string? suggestedFolder)
     {
-        var picker = new FileOpenPicker
+        var picker = new FileOpenPicker(AppWindow.Id)
         {
             SettingsIdentifier = "frames",
             SuggestedStartLocation = PickerLocationId.PicturesLibrary,
             ViewMode = PickerViewMode.Thumbnail,
         };
+        if (Existing(suggestedFolder) is { } folder) picker.SuggestedFolder = folder;
         foreach (var t in FrameTypes) picker.FileTypeFilter.Add(t);
-        InitializeWithWindow.Initialize(picker, Hwnd);
         var files = await picker.PickMultipleFilesAsync();
         return files?.Select(f => f.Path).ToList() ?? [];
     }
 
-    public async Task<string?> PickSaveFileAsync(string suggestedName, string format)
+    public async Task<string?> PickSaveFileAsync(string suggestedName, string format, string? suggestedFolder)
     {
-        var picker = new FileSavePicker
+        var picker = new FileSavePicker(AppWindow.Id)
         {
             SettingsIdentifier = "output",
             SuggestedStartLocation = PickerLocationId.PicturesLibrary,
             SuggestedFileName = Path.GetFileNameWithoutExtension(suggestedName),
         };
-        // The first choice is the default type.
-        var tiff = ("TIFF 16-bit", (IList<string>)[".tif", ".tiff"]);
-        var jpg = ("JPEG", (IList<string>)[".jpg", ".jpeg"]);
-        foreach (var (name, exts) in format == "jpg" ? [jpg, tiff] : new[] { tiff, jpg })
-            picker.FileTypeChoices.Add(name, exts);
-        InitializeWithWindow.Initialize(picker, Hwnd);
-        var file = await picker.PickSaveFileAsync();
-        return file?.Path;
+        if (Existing(suggestedFolder) is { } folder) picker.SuggestedFolder = folder;
+        const string tiff = "TIFF 16-bit", jpg = "JPEG";
+        picker.FileTypeChoices.Add(tiff, [".tif", ".tiff"]);
+        picker.FileTypeChoices.Add(jpg, [".jpg", ".jpeg"]);
+        // The last-used format is the default type, by its index in the choices as the picker lists them.
+        int initial = picker.FileTypeChoices.Keys.ToList().IndexOf(format == "jpg" ? jpg : tiff);
+        if (initial >= 0) picker.InitialFileTypeIndex = initial;
+        var result = await picker.PickSaveFileAsync();
+        return result?.Path;
     }
 }

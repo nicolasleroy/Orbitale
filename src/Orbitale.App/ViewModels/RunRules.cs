@@ -12,10 +12,21 @@ public static class RunGate
 
     /// <summary>
     /// Start needs frames, waits for a frame list being read, and never runs while the previous result is in use
-    /// (saved or rendered off the UI thread): Start disposes it.
+    /// (saved or rendered off the UI thread): Start disposes it. It also waits for an original frame being decoded for
+    /// display (~0.5 GB as float at 40 MP), which on top of a run would push the memory peak past 8 GB.
     /// </summary>
-    public static bool CanStart(SessionState s, bool hasFrames, bool loadingFrames, bool resultBusy) =>
-        s is SessionState.Idle or SessionState.Finished or SessionState.Stopped && hasFrames && !loadingFrames && !resultBusy;
+    public static bool CanStart(SessionState s, bool hasFrames, bool loadingFrames, bool resultBusy, bool frameDecoding) =>
+        s is SessionState.Idle or SessionState.Finished or SessionState.Stopped && hasFrames && !loadingFrames && !resultBusy && !frameDecoding;
+
+    /// <summary>
+    /// What closing the window does: a save in flight is finished first (closing would lose the file and leave its
+    /// temporary file behind), a run in progress or a result never saved needs the user's confirmation.
+    /// </summary>
+    public static CloseAction OnClose(SessionState s, bool saving, bool hasUnsavedResult) =>
+        saving ? CloseAction.WaitForSave
+        : IsRunning(s) ? CloseAction.ConfirmStopRun
+        : hasUnsavedResult ? CloseAction.ConfirmDiscardResult
+        : CloseAction.Close;
 
     public static bool CanStop(SessionState s) => s == SessionState.Running;
 
@@ -28,18 +39,47 @@ public static class RunGate
     public static bool CanViewFrame(SessionState s) => !IsRunning(s);
 }
 
+/// <summary>What closing the window does (see <see cref="RunGate.OnClose"/>).</summary>
+public enum CloseAction
+{
+    /// <summary>Close now.</summary>
+    Close,
+    /// <summary>Keep the window open, show <see cref="RunText.FinishingSave"/> and close once the save is done.</summary>
+    WaitForSave,
+    /// <summary>Ask <see cref="RunText.ClosePrompt"/>; on yes, stop the run and close.</summary>
+    ConfirmStopRun,
+    /// <summary>Ask <see cref="RunText.ClosePrompt"/>; on yes, close without saving.</summary>
+    ConfirmDiscardResult,
+}
+
 /// <summary>The texts of the status bar and the image badge.</summary>
 public static class RunText
 {
     public static string Status(StackProgress p)
     {
         var text = $"{p.Processed} / {p.Total} · {Trails(p.TrailsTotal)}";
+        if (p.TrailRemovalSkipped > 0) text += $" · {p.TrailRemovalSkipped} skipped (no sky alignment)";
         return p.Eta is { } eta && eta > TimeSpan.Zero && p.Processed < p.Total ? $"{text} · ~{TimeLeft(eta)} left" : text;
     }
 
-    public static string Finished(int frames, int trails) => $"Done · {Plural(frames, "frame")} · {Trails(trails)}";
+    public static string Finished(int frames, int trails, int trailRemovalSkipped = 0) =>
+        $"Done · {Plural(frames, "frame")} · {Trails(trails)}" + Skipped(trailRemovalSkipped);
 
-    public static string Stopped(int processed, int total) => $"Stopped at {processed} / {total} · result kept";
+    public static string Stopped(int processed, int total, int trailRemovalSkipped = 0) =>
+        $"Stopped at {processed} / {total} · result kept" + Skipped(trailRemovalSkipped);
+
+    /// <summary>The status while a close waits for the save in flight.</summary>
+    public static string FinishingSave => "Finishing save… Orbitale closes when it is done";
+
+    /// <summary>The confirmation asked before closing, or null when none is asked.</summary>
+    public static string? ClosePrompt(CloseAction a) => a switch
+    {
+        CloseAction.ConfirmStopRun => "Stop the run and close?",
+        CloseAction.ConfirmDiscardResult => "Close without saving the result?",
+        _ => null,
+    };
+
+    static string Skipped(int n) => n > 0 ? $" · trail removal skipped on {Plural(n, "frame")} (sky alignment failed)" : "";
 
     public static string LiveBadge(int processed, int total) => $"Live · frame {processed} / {total}";
 
@@ -107,9 +147,15 @@ public static class StackSettingsMapper
         TrailSensitivity = trailSensitivity / 100,
     };
 
-    /// <summary>The settings a run uses: comet and gap filling only exist in Lighten (the strengths are kept).</summary>
-    public static StackSettings ForRun(StackSettings s) =>
-        s.Mode == BlendMode.Lighten ? s : s with { Comet = false, GapFill = false };
+    /// <summary>
+    /// The settings a run uses: comet and gap filling only exist in Lighten (the strengths are kept), and HeadAtStart only
+    /// places the comet head, so without a comet the run keeps file order.
+    /// </summary>
+    public static StackSettings ForRun(StackSettings s)
+    {
+        var run = s.Mode == BlendMode.Lighten ? s : s with { Comet = false, GapFill = false };
+        return run.Comet ? run : run with { HeadAtStart = false };
+    }
 }
 
 /// <summary>
