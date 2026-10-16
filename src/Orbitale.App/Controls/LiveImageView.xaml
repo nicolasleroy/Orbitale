@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Orbitale.App.Controls.LiveImageView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Placeholder: the live preview (zoom, pan, badge, trail overlay) replaces this canvas. -->
+    <Grid Background="#FF07090F">
+        <TextBlock
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+            Style="{StaticResource SubtitleTextBlockStyle}"
+            Text="{x:Bind Hint, Mode=OneWay}" />
+    </Grid>
+</UserControl>
