@@ -82,6 +82,8 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
 
     public void Show(PreviewImage image, double sourceWidth) => LiveView.Show(image, sourceWidth);
 
+    public void Clear() => LiveView.Clear();
+
     public void FlashTrails(IReadOnlyList<LineSegment> previewCoords) => LiveView.FlashTrails(previewCoords);
 
     public void BringIntoView(object frame) => Strip.ScrollIntoView(frame);

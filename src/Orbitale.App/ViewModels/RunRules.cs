@@ -111,3 +111,18 @@ public static class StackSettingsMapper
     public static StackSettings ForRun(StackSettings s) =>
         s.Mode == BlendMode.Lighten ? s : s with { Comet = false, GapFill = false };
 }
+
+/// <summary>
+/// Counts the background operations reading the session's result (full-resolution renders), so Start, which
+/// disposes the result, stays disabled until every one of them has finished. UI thread only.
+/// </summary>
+public sealed class ResultReaders
+{
+    int _count;
+
+    public bool InUse => _count > 0;
+
+    public void Begin() => _count++;
+
+    public void End() => _count = Math.Max(0, _count - 1);
+}

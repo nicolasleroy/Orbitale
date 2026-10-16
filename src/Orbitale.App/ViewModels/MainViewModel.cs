@@ -33,6 +33,7 @@ public partial class MainViewModel : ObservableObject
     readonly StackSession _session;
     readonly StackSettings _loadedStack;
     readonly NoticeLog _notices = new();
+    readonly ResultReaders _resultReaders = new();
     FrameSequence? _sequence;
 
     // The current or last run.
@@ -141,11 +142,8 @@ public partial class MainViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(AddFramesCommand), nameof(AddFrameFilesCommand), nameof(RemoveFramesCommand), nameof(StartCommand), nameof(SaveCommand))]
     public partial bool IsSaving { get; set; }
 
-    /// <summary>True while the full-resolution result is rendered for the view (off the UI thread).</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsBusy))]
-    [NotifyCanExecuteChangedFor(nameof(StartCommand))]
-    public partial bool IsRenderingResult { get; set; }
+    /// <summary>True while at least one full-resolution render reads the result (off the UI thread); renders can overlap.</summary>
+    public bool IsRenderingResult => _resultReaders.InUse;
 
     public bool CanEditFrames => RunGate.CanEditFrames(_session.State, IsLoadingFrames, IsSaving);
 
@@ -272,6 +270,7 @@ public partial class MainViewModel : ObservableObject
         _viewVersion++;   // a frame or result still rendering must not replace the live view
         _requestedFrame = null;
         IsViewingFrame = false;
+        _surface.Clear();   // drop the last result's full-resolution bitmap (~160 MB) before the run
         _tracker = new FrameStateTracker(Frames.ToList());
         _tracker.Reset();
         _lastProgress = null;
@@ -482,7 +481,7 @@ public partial class MainViewModel : ObservableObject
         _requestedFrame = null;
         var badge = RunText.ResultBadge(result.Completed, result.FramesProcessed, seq.Files.Count);
         BadgeText = $"{badge} · rendering full resolution…";
-        IsRenderingResult = true;
+        BeginResultRead();
         var clock = Stopwatch.StartNew();
         try
         {
@@ -501,8 +500,28 @@ public partial class MainViewModel : ObservableObject
         }
         finally
         {
-            IsRenderingResult = false;
+            EndResultRead();
         }
+    }
+
+    void BeginResultRead()
+    {
+        _resultReaders.Begin();
+        OnResultReadersChanged();
+    }
+
+    /// <summary>Called by every render that began, superseded or not: Start waits for the last one.</summary>
+    void EndResultRead()
+    {
+        _resultReaders.End();
+        OnResultReadersChanged();
+    }
+
+    void OnResultReadersChanged()
+    {
+        OnPropertyChanged(nameof(IsRenderingResult));
+        OnPropertyChanged(nameof(IsBusy));
+        StartCommand.NotifyCanExecuteChanged();
     }
 
     void ShowError(string title, string message)

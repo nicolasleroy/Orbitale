@@ -161,3 +161,32 @@ public sealed class StackSettingsMapperTests
         Assert.Equal(new StackSettings(BlendMode.Lighten, true, 0.5, false, true, 0.25, true, 0.6, NeighbourK: 3), s);
     }
 }
+
+public sealed class ResultReadersTests
+{
+    [Fact]
+    public void Start_stays_blocked_until_every_overlapping_render_has_finished()
+    {
+        var readers = new ResultReaders();
+        bool CanStart() => RunGate.CanStart(SessionState.Finished, hasFrames: true, loadingFrames: false, resultBusy: readers.InUse);
+
+        readers.Begin();   // render #1, at the end of the run
+        readers.Begin();   // render #2, "Back to result" after viewing a frame
+        readers.End();     // render #1 finishes (superseded) while #2 still reads the result
+        Assert.True(readers.InUse);
+        Assert.False(CanStart());
+
+        readers.End();     // render #2 finishes
+        Assert.False(readers.InUse);
+        Assert.True(CanStart());
+    }
+
+    [Fact]
+    public void An_unbalanced_end_never_goes_below_zero()
+    {
+        var readers = new ResultReaders();
+        readers.End();
+        readers.Begin();
+        Assert.True(readers.InUse);
+    }
+}

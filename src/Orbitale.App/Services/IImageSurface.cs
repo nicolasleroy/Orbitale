@@ -9,6 +9,9 @@ public interface IImageSurface
     /// <summary>Shows a BGRA image laid out as an image <paramref name="sourceWidth"/> pixels wide (the full-resolution width).</summary>
     void Show(PreviewImage image, double sourceWidth);
 
+    /// <summary>Removes the image and releases its bitmap (the hint shows again).</summary>
+    void Clear();
+
     /// <summary>Briefly outlines removed trails, in pixels of the image last shown.</summary>
     void FlashTrails(IReadOnlyList<LineSegment> previewCoords);
 

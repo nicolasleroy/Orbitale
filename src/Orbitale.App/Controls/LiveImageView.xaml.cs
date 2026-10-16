@@ -112,6 +112,16 @@ public sealed partial class LiveImageView : UserControl
         }
     }
 
+    /// <summary>Removes the image and releases its bitmap, so a full-resolution one does not outlive its use; the hint shows again.</summary>
+    public void Clear()
+    {
+        Picture.Source = null;
+        _bitmap = null;
+        _surfaceWidth = _surfaceHeight = 0;   // the next image fits the view
+        ClearFlashes();
+        HintText.Visibility = Visibility.Visible;
+    }
+
     /// <summary>Outlines <paramref name="previewCoords"/> (pixels of the image last shown) in amber, fading out over a second.</summary>
     public void FlashTrails(IReadOnlyList<LineSegment> previewCoords)
     {
