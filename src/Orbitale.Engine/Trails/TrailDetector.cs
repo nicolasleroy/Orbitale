@@ -28,8 +28,8 @@ public static class TrailDetector
     const double MinLength = 0.03;  // fraction of the long side
     const int MaxGap = 25;          // px gap allowed in dashed (blinking) trails
     const double MinFill = 0.35;    // fraction of a segment that must be lit
-    const int LineWidth = 7;        // mask line thickness (px)
-    const int MaskDilate = 5;       // grow over the trail's halo (px)
+    internal const int LineWidth = 7;        // mask line thickness (px)
+    internal const int MaskDilate = 5;       // grow over the trail's halo (px)
 
     public static TrailDetection Detect(Mat frameGray32f, Mat refGray32f, TrailSettings s)
     {

@@ -69,7 +69,29 @@ public static class TrailRemover
     }
 
     /// <summary>
-    /// A trail is new light: along the segment the frame must be brighter than beside it (±8 px, outside the
+    /// The removed-trail mask at full resolution (CV_8UC1, 0/255) for segments in full-resolution coordinates: the
+    /// detection mask's width-7 lines and 5 px ellipse dilate, both scaled by full/detection long side. All zero when
+    /// there are no segments. Used to keep removed trails out of star detection.
+    /// </summary>
+    public static Mat FullResMask(Size fullSize, IReadOnlyList<LineSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        var mask = new Mat(fullSize, MatType.CV_8UC1, Scalar.All(0));
+        if (segments.Count == 0) return mask;
+        var det = DetectionScale.For(fullSize);
+        double scale = (double)Math.Max(fullSize.Width, fullSize.Height) / Math.Max(det.Width, det.Height);
+        int width = Math.Max(1, (int)Math.Round(TrailDetector.LineWidth * scale));
+        int dilate = (int)Math.Round(TrailDetector.MaskDilate * scale) | 1;
+        foreach (var g in segments)
+            Cv2.Line(mask, new Point((int)Math.Round(g.X1), (int)Math.Round(g.Y1)), new Point((int)Math.Round(g.X2), (int)Math.Round(g.Y2)),
+                     Scalar.All(255), width);
+        using var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(dilate, dilate));
+        Cv2.Dilate(mask, mask, k);
+        return mask;
+    }
+
+    /// <summary>
+    /// A trail is new light:along the segment the frame must be brighter than beside it (±8 px, outside the
     /// mask corridor), and the neighbour median must show less than half of that contrast. A static bright
     /// line has the same contrast in both and is rejected.
     /// </summary>

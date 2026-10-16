@@ -221,4 +221,22 @@ public class TrailRemoverTests
         DisposeAll(frames);
         Assert.True(after < before * 0.05, $"mean diff along streak {before:F3} -> {after:F3}");
     }
+
+    [Fact] public void FullResMaskScalesTheDetectionMaskWidth()
+    {
+        // 4000 x 2000 -> detection 2000 x 1000, scale 2: the width-7 line + 5 px dilate (half-width ~5.5 detection px)
+        // becomes ~11 full-res px either side of the axis.
+        var segs = new[] { new LineSegment(500, 1000, 3500, 1000) };
+        using var m = TrailRemover.FullResMask(new Size(4000, 2000), segs);
+        Assert.Equal(MatType.CV_8UC1, m.Type());
+        Assert.Equal(new Size(4000, 2000), m.Size());
+        Assert.NotEqual(0, m.At<byte>(1000, 2000));
+        Assert.NotEqual(0, m.At<byte>(1010, 2000));
+        Assert.NotEqual(0, m.At<byte>(990, 2000));
+        Assert.Equal(0, m.At<byte>(1014, 2000));
+        Assert.Equal(0, m.At<byte>(986, 2000));
+        Assert.Equal(0, m.At<byte>(1000, 400));
+        using var empty = TrailRemover.FullResMask(new Size(4000, 2000), []);
+        Assert.Equal(0, Cv2.CountNonZero(empty));
+    }
 }

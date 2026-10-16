@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Orbitale.Engine.Tests" />
+    <InternalsVisibleTo Include="Orbitale.Cli" />
   </ItemGroup>
 
   <ItemGroup>
