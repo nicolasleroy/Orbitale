@@ -306,23 +306,52 @@ public class TrailRemoverTests(ITestOutputHelper output)
         Assert.True(peakAfter >= 0.8 * peakBefore, $"star peak {peakBefore:F3} -> {peakAfter:F3}");
     }
 
-    [Fact] public void RemovesShortSlowPlanePieceInFastMovingSky()
+    // Production-like scale for the slow-plane tests: 4000 x 2400 (detection 1/2), 0.4 deg/frame about (2000, -600).
+    // Around (1021, 421) the stars move along (-0.72, -0.69) (tangent to the rotation), i.e. on a 44 deg line.
+    static (double Before, double After, IReadOnlyList<LineSegment> Segments) CleanWithLine(int seed, Point a, Point b, int thickness)
     {
-        // A slow plane records only a short piece per exposure: 30 detection px at 45 deg (dx = dy = 21 detection px),
-        // under the prototype's 0.03 x long side (60 detection px) and under OpenCV's per-axis length check for any
-        // minimum above 21. Production-like scale: detection at half size, stars moving 11 detection px per frame.
-        using var sky = FastSky(seed: 35, 4000, 2400, 0.4, 2000);
-        var a = new Point(1000, 400); var b = new Point(1042, 442);
+        using var sky = FastSky(seed, 4000, 2400, 0.4, 2000);
         using var clean = sky.Frames[2].Clone();
-        Cv2.Line(sky.Frames[2], a, b, Scalar.All(0.8), 4);
+        Cv2.Line(sky.Frames[2], a, b, Scalar.All(0.8), thickness);
         var ns = Aligned(sky.Frames);
         using var r = TrailRemover.Clean(sky.Frames[2], ns, new TrailSettings());
         DisposeAffines(ns);
-        double before = TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y));
-        double after = TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y));
-        output.WriteLine($"{r.Segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", r.Segments)}");
-        Assert.Contains(r.Segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 4);
+        return (TestMasks.MeanAbsDiffAlong(sky.Frames[2], clean, (a.X, a.Y), (b.X, b.Y)),
+                TestMasks.MeanAbsDiffAlong(r.Cleaned, clean, (a.X, a.Y), (b.X, b.Y)), r.Segments.ToList());
+    }
+
+    [Fact] public void RemovesShortSlowPlanePieceAcrossTheStarMotion()
+    {
+        // A slow plane records only a short piece per exposure: 30 detection px (dx = dy = 21 detection px), under the
+        // prototype's 0.03 x long side (60 detection px) and under OpenCV's per-axis length check for any minimum above
+        // 21. It runs at 135 deg, about 89 deg from the local star motion: short pieces that cross the motion are planes.
+        var a = new Point(1042, 400); var b = new Point(1000, 442);
+        var (before, after, segments) = CleanWithLine(35, a, b, 4);
+        output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
+        Assert.Contains(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 4);
         Assert.True(after < before * 0.05, $"mean diff along the piece {before:F4} -> {after:F4}");
+    }
+
+    [Fact] public void IgnoresShortLineAlongTheStarMotion()
+    {
+        // The same 30 detection px piece at 45 deg, within 1-2 deg of the local star motion: short lines along the motion
+        // are what star residues look like (misalignment at the frame edges), so they are not accepted, even when real.
+        var a = new Point(1000, 400); var b = new Point(1042, 442);
+        var (before, after, segments) = CleanWithLine(35, a, b, 4);
+        output.WriteLine($"{segments.Count} segments, mean diff along the piece {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
+        Assert.DoesNotContain(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6
+                                             && Math.Min(s.X1, s.X2) < b.X + 20 && Math.Max(s.X1, s.X2) > a.X - 20);
+        Assert.True(after > before * 0.9, $"the piece was repaired: {before:F4} -> {after:F4}");
+    }
+
+    [Fact] public void RemovesLongStreakAlongTheStarMotion()
+    {
+        // 200 detection px along the local star motion: long segments are accepted whatever their direction.
+        var a = new Point(855, 261); var b = new Point(1145, 539);
+        var (before, after, segments) = CleanWithLine(36, a, b, 2);
+        output.WriteLine($"{segments.Count} segments, mean diff along the streak {before:F4} -> {after:F4}: {string.Join("; ", segments)}");
+        Assert.Contains(segments, s => TestMasks.DistanceToLine(s, (a.X, a.Y), (b.X, b.Y)) < 6);
+        Assert.True(after < before * 0.05, $"mean diff along the streak {before:F4} -> {after:F4}");
     }
 
     [Fact] public void MergesCollinearPiecesAndKeepsParallelLinesApart()

@@ -25,7 +25,7 @@ public static class TrailDetector
 {
     internal const int StarDilate = 7; // px, must exceed star drift between frames
     internal const int MinBlob = 4; // drop residual blobs smaller than this (px)
-    const double MinLength = 0.03;  // fraction of the long side
+    internal const double MinLength = 0.03;  // fraction of the long side
     internal const double ShortMinLength = 0.01;   // aligned path: Euclidean minimum, fraction of the long side (slow planes),
     const int ShortMinPixels = 20;                 // and at least 20 px (= 0.01 of the 2000 px detection long side)
     const double MergeAngleDeg = 2;      // distinct lines: pieces within this angle,

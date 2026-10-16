@@ -93,7 +93,12 @@ public static class TrailRemover
 
         // Guard against static structures (a lit road, a wire, the horizon): keep only segments that are
         // bright in this frame but not in the neighbour median(s). Detection itself stays a pure prototype port.
-        var transient = detection.Segments.Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
+        // Aligned path: short pieces (under the prototype's 0.03 of the long side) are kept only when they cross the local
+        // star motion; along it they are what star residues look like where the alignment misfits (lens distortion).
+        double longMin = TrailDetector.MinLength * Math.Max(detSize.Width, detSize.Height);
+        var transient = detection.Segments
+            .Where(g => alignedGray is null || Length(g) >= longMin || CrossesStarMotion(g, neighbours, sx, sy))
+            .Where(g => IsTransient(frameGray, medianGray, alignedGray, g)).ToList();
         if (transient.Count == 0)
             return new TrailCleanResult(frame.Clone(), []);
         using var trailMask = transient.Count == detection.Segments.Count
@@ -124,6 +129,33 @@ public static class TrailRemover
             PutAlignedSkyUnderTrails(median, neighbours, sky, trailMask, sx, sy);
         }
         return new TrailCleanResult(Blend(frame, median, weight), segments);
+    }
+
+    const double ShortPieceMinAngle = 20;   // degrees between a short piece and the local star motion (undirected)
+    const double MotionMinPixels = 0.5;     // full-res px: below this the star motion has no direction
+
+    static double Length(LineSegment g) => Math.Sqrt((double)(g.X2 - g.X1) * (g.X2 - g.X1) + (double)(g.Y2 - g.Y1) * (g.Y2 - g.Y1));
+
+    /// <summary>
+    /// True when the piece <paramref name="g"/> (detection px) runs at least 20° (undirected lines, 0..90°) away from the
+    /// local star motion at its midpoint: the displacement of that point under the neighbour affine with the smallest
+    /// motion there (the nearest in time). False when no neighbour has an affine or the stars barely move there.
+    /// </summary>
+    static bool CrossesStarMotion(LineSegment g, IReadOnlyList<AlignedNeighbour> neighbours, double sx, double sy)
+    {
+        double mx = ((g.X1 + g.X2) / 2.0 + 0.5) * sx - 0.5, my = ((g.Y1 + g.Y2) / 2.0 + 0.5) * sy - 0.5;
+        double bestX = 0, bestY = 0, best = double.PositiveInfinity;
+        foreach (var n in neighbours)
+        {
+            if (n.ToCurrent is not { } m) continue;
+            double dx = m.At<double>(0, 0) * mx + m.At<double>(0, 1) * my + m.At<double>(0, 2) - mx;
+            double dy = m.At<double>(1, 0) * mx + m.At<double>(1, 1) * my + m.At<double>(1, 2) - my;
+            double d = Math.Sqrt(dx * dx + dy * dy);
+            if (d >= MotionMinPixels && d < best) (best, bestX, bestY) = (d, dx, dy);
+        }
+        if (double.IsPositiveInfinity(best)) return false;
+        double angle = Math.Abs(Math.Atan2((g.Y2 - g.Y1) * sy, (g.X2 - g.X1) * sx) - Math.Atan2(bestY, bestX)) * 180 / Math.PI % 180;
+        return Math.Min(angle, 180 - angle) >= ShortPieceMinAngle;
     }
 
     /// <summary>
