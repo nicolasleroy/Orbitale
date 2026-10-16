@@ -30,11 +30,13 @@ public static class ImageWriter
         img.ReadPixels(bytes, settings);
 
         if (meta.IccProfile is { } icc) img.SetProfile(new ColorProfile(icc));
+        byte[]? exifOut = null;
         if (meta.Exif is { } exifBytes)
         {
             var exif = new ExifProfile(exifBytes);
             exif.SetValue(ExifTag.Orientation, (ushort)1);
             img.SetProfile(exif);
+            exifOut = exif.ToByteArray();
         }
         img.Orientation = Orientation.TopLeft;
 
@@ -54,6 +56,8 @@ public static class ImageWriter
         try
         {
             img.Write(tmp);
+            // Magick.NET's TIFF encoder drops the EXIF profile, so merge it in ourselves.
+            if (tiff && exifOut is not null) TiffExifInjector.Inject(tmp, exifOut);
             File.Move(tmp, path, overwrite: true);
         }
         finally
