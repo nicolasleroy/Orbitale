@@ -7,32 +7,19 @@ namespace Orbitale.App.Services;
 
 /// <summary>
 /// Shell thumbnails (Windows uses the JPEG's embedded preview, so a 40 MP frame is never decoded here).
-/// Must be called on the UI thread: <see cref="BitmapImage"/> is a XAML object.
+/// Must be called on the UI thread: <see cref="BitmapImage"/> is a XAML object. Scheduling and error handling are
+/// <see cref="ThumbnailQueue{TImage}"/>'s job.
 /// </summary>
-public sealed class ThumbnailLoader
+public static class ThumbnailLoader
 {
-    readonly SemaphoreSlim _gate = new(4);
-
-    public async Task<ImageSource?> LoadAsync(string path, uint size)
+    public static async Task<ImageSource?> LoadAsync(string path, uint size, CancellationToken token)
     {
-        await _gate.WaitAsync();
-        try
-        {
-            var file = await StorageFile.GetFileFromPathAsync(path);
-            using var thumb = await file.GetThumbnailAsync(ThumbnailMode.SingleItem, size, ThumbnailOptions.ResizeThumbnail);
-            if (thumb is null) return null;
-            var bmp = new BitmapImage();
-            await bmp.SetSourceAsync(thumb);
-            return bmp;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException
-                                      or System.Runtime.InteropServices.COMException)
-        {
-            return null;
-        }
-        finally
-        {
-            _gate.Release();
-        }
+        var file = await StorageFile.GetFileFromPathAsync(path).AsTask(token);
+        using var thumb = await file.GetThumbnailAsync(ThumbnailMode.SingleItem, size, ThumbnailOptions.ResizeThumbnail).AsTask(token);
+        if (thumb is null) return null;
+        token.ThrowIfCancellationRequested();
+        var bmp = new BitmapImage();
+        await bmp.SetSourceAsync(thumb).AsTask(token);
+        return bmp;
     }
 }

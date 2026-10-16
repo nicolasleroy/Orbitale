@@ -20,6 +20,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- UI-free scheduling class of the WinUI app, compiled in here so it can be unit-tested without hosting WinUI. -->
+    <Compile Include="..\..\src\Orbitale.App\Services\ThumbnailQueue.cs" Link="App\ThumbnailQueue.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Orbitale.Engine\Orbitale.Engine.csproj" />
   </ItemGroup>
 

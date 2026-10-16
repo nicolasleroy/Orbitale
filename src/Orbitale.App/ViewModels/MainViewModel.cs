@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.UI.Xaml.Media;
 using Orbitale.App.Services;
 using Orbitale.Engine.Blending;
 using Orbitale.Engine.Frames;
@@ -19,15 +20,17 @@ public partial class MainViewModel : ObservableObject
     const uint ThumbnailSize = 160;
 
     readonly IFilePickers _pickers;
-    readonly ThumbnailLoader _thumbnails;
+    readonly ThumbnailQueue<ImageSource> _thumbnails;
     readonly StackSession _session;
     readonly StackSettings _loadedStack;
     FrameSequence? _sequence;
 
-    public MainViewModel(IFilePickers pickers, ThumbnailLoader thumbnails, StackSession session, AppSettings settings)
+    public MainViewModel(IFilePickers pickers, StackSession session, AppSettings settings)
     {
         _pickers = pickers;
-        _thumbnails = thumbnails;
+        _thumbnails = new ThumbnailQueue<ImageSource>(
+            (path, token) => ThumbnailLoader.LoadAsync(path, ThumbnailSize, token),
+            (path, e) => Diagnostics.Log($"Thumbnail failed for {path}: {e.GetType().Name}: {e.Message}"));
         _session = session;
         _session.StateChanged += OnSessionStateChanged;
 
@@ -209,13 +212,11 @@ public partial class MainViewModel : ObservableObject
 
     // ---- Thumbnails ----
 
-    /// <summary>Loads the item's shell thumbnail once; called by the strip when the item is realised (UI thread).</summary>
-    public async void EnsureThumbnail(FrameItem item)
-    {
-        if (item.ThumbnailRequested) return;
-        item.ThumbnailRequested = true;
-        item.Thumbnail = await _thumbnails.LoadAsync(item.Path, ThumbnailSize);
-    }
+    /// <summary>Loads the item's shell thumbnail; called by the strip when the item is realised (UI thread). Never throws.</summary>
+    public Task RequestThumbnailAsync(FrameItem item) => _thumbnails.RequestAsync(item);
+
+    /// <summary>Cancels the item's pending load; called when its container is recycled.</summary>
+    public void CancelThumbnail(FrameItem item) => _thumbnails.Cancel(item);
 
     // ---- Settings snapshot ----
 
@@ -255,7 +256,11 @@ public partial class MainViewModel : ObservableObject
             var existing = Frames.ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
             Frames.Clear();
             foreach (var path in seq?.Files ?? [])
-                Frames.Add(existing.TryGetValue(path, out var item) ? item : new FrameItem(path));
+            {
+                if (existing.Remove(path, out var item)) Frames.Add(item);
+                else Frames.Add(new FrameItem(path));
+            }
+            foreach (var removed in existing.Values) _thumbnails.Cancel(removed);
 
             var skipped = seq?.Skipped ?? [];
             SkippedTitle = skipped.Count == 1 ? "1 file was skipped" : $"{skipped.Count} files were skipped";

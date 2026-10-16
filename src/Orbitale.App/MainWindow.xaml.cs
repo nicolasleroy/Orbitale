@@ -19,7 +19,7 @@ public sealed partial class MainWindow : Window, IFilePickers
     public MainWindow()
     {
         InitializeComponent();
-        ViewModel = new MainViewModel(this, new ThumbnailLoader(), new StackSession(), SettingsStore.Load());
+        ViewModel = new MainViewModel(this, new StackSession(), SettingsStore.Load());
 
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Orbitale.ico"));
         AppWindow.TitleBar.PreferredTheme = TitleBarTheme.Dark;
@@ -40,7 +40,9 @@ public sealed partial class MainWindow : Window, IFilePickers
 
     void Strip_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (!args.InRecycleQueue && args.Item is FrameItem item) ViewModel.EnsureThumbnail(item);
+        if (args.Item is not FrameItem item) return;
+        if (args.InRecycleQueue) ViewModel.CancelThumbnail(item);
+        else _ = ViewModel.RequestThumbnailAsync(item);
     }
 
     void Strip_KeyDown(object sender, KeyRoutedEventArgs e)

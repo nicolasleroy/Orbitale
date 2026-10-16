@@ -1,12 +1,13 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using Microsoft.UI.Xaml.Media;
+using Orbitale.App.Services;
 
 namespace Orbitale.App.ViewModels;
 
 public enum FrameState { Pending, Current, Done, DoneWithTrails, Skipped }
 
 /// <summary>One frame of the sequence as shown in the thumbnail strip.</summary>
-public partial class FrameItem : ObservableObject
+public partial class FrameItem : ObservableObject, IThumbnailSlot<ImageSource>
 {
     public FrameItem(string path)
     {
@@ -31,9 +32,6 @@ public partial class FrameItem : ObservableObject
     /// <summary>Shell thumbnail, loaded lazily when the item scrolls into view.</summary>
     [ObservableProperty]
     public partial ImageSource? Thumbnail { get; set; }
-
-    /// <summary>Set once a thumbnail load was requested, so a re-realised container doesn't request it again.</summary>
-    internal bool ThumbnailRequested { get; set; }
 
     /// <summary>The list item's accessible name.</summary>
     public override string ToString() => FileName;
