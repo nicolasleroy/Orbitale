@@ -61,6 +61,8 @@ public static class SettingsStore
         }
     }
 
+    const int MaxNeighbourK = 3, MinPreviewLongSide = 512, MaxPreviewLongSide = 4096;
+
     static AppSettings Repair(AppSettings s)
     {
         var d = new StackSettings();
@@ -71,8 +73,10 @@ public static class SettingsStore
             CometStrength = Unit(st.CometStrength, d.CometStrength),
             GapFillStrength = Unit(st.GapFillStrength, d.GapFillStrength),
             TrailSensitivity = Unit(st.TrailSensitivity, d.TrailSensitivity),
-            NeighbourK = st.NeighbourK >= 1 ? st.NeighbourK : d.NeighbourK,
-            PreviewMaxLongSide = st.PreviewMaxLongSide > 0 ? st.PreviewMaxLongSide : d.PreviewMaxLongSide,
+            // Non-positive values are nonsense (the default); others are clamped. K > 3 would ask the temporal median for
+            // more than its 6 frames.
+            NeighbourK = st.NeighbourK >= 1 ? Math.Min(st.NeighbourK, MaxNeighbourK) : d.NeighbourK,
+            PreviewMaxLongSide = st.PreviewMaxLongSide > 0 ? Math.Clamp(st.PreviewMaxLongSide, MinPreviewLongSide, MaxPreviewLongSide) : d.PreviewMaxLongSide,
         };
         return s with
         {

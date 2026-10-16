@@ -98,6 +98,34 @@ public sealed class SettingsStoreTests : IDisposable
         Assert.Equal("tif", loaded.LastOutputFormat);
     }
 
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(3, 3)]
+    [InlineData(4, 3)]       // the temporal median takes at most 6 neighbours
+    [InlineData(1000, 3)]
+    [InlineData(-2, 2)]      // nonsense: the default
+    public void NeighbourK_is_clamped_to_1_to_3(int stored, int expected)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        File.WriteAllText(FilePath, $"{{\"Stack\": {{\"NeighbourK\": {stored}}}}}");
+
+        Assert.Equal(expected, SettingsStore.Load(FilePath).Stack.NeighbourK);
+    }
+
+    [Theory]
+    [InlineData(512, 512)]
+    [InlineData(4096, 4096)]
+    [InlineData(100, 512)]
+    [InlineData(100000, 4096)]
+    [InlineData(0, 2560)]    // nonsense: the default
+    public void PreviewMaxLongSide_is_clamped_to_512_to_4096(int stored, int expected)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        File.WriteAllText(FilePath, $"{{\"Stack\": {{\"PreviewMaxLongSide\": {stored}}}}}");
+
+        Assert.Equal(expected, SettingsStore.Load(FilePath).Stack.PreviewMaxLongSide);
+    }
+
     [Fact]
     public void Null_stack_gives_default_stack()
     {
