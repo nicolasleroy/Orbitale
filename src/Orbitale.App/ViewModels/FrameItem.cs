@@ -4,10 +4,8 @@ using Orbitale.App.Services;
 
 namespace Orbitale.App.ViewModels;
 
-public enum FrameState { Pending, Current, Done, DoneWithTrails, Skipped }
-
 /// <summary>One frame of the sequence as shown in the thumbnail strip.</summary>
-public partial class FrameItem : ObservableObject, IThumbnailSlot<ImageSource>
+public partial class FrameItem : ObservableObject, IThumbnailSlot<ImageSource>, IFrameStatus
 {
     public FrameItem(string path)
     {

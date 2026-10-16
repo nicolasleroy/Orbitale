@@ -4,22 +4,24 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Orbitale.App.Services;
 using Orbitale.App.ViewModels;
+using Orbitale.Engine.Imaging;
 using Orbitale.Engine.Settings;
 using Orbitale.Engine.Stacking;
+using Orbitale.Engine.Trails;
 using Windows.Storage.Pickers;
 using Windows.System;
 using WinRT.Interop;
 
 namespace Orbitale.App;
 
-public sealed partial class MainWindow : Window, IFilePickers
+public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
 {
     static readonly string[] FrameTypes = [".jpg", ".jpeg", ".tif", ".tiff"];
 
     public MainWindow()
     {
         InitializeComponent();
-        ViewModel = new MainViewModel(this, new StackSession(), SettingsStore.Load());
+        ViewModel = new MainViewModel(this, this, new DispatcherQueueUi(DispatcherQueue), new StackSession(), SettingsStore.Load());
 
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Orbitale.ico"));
         AppWindow.TitleBar.PreferredTheme = TitleBarTheme.Dark;
@@ -62,6 +64,12 @@ public sealed partial class MainWindow : Window, IFilePickers
         }
     }
 
+    /// <summary>Clicking a thumbnail shows that original frame (the view model ignores it during a run).</summary>
+    void Strip_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is FrameItem item) ViewModel.ViewFrameCommand.Execute(item);
+    }
+
     void RemoveSelected_Click(object sender, RoutedEventArgs e) => RemoveSelected();
 
     void RemoveSelected()
@@ -69,6 +77,14 @@ public sealed partial class MainWindow : Window, IFilePickers
         var items = Strip.SelectedItems.OfType<FrameItem>().ToList();
         if (ViewModel.RemoveFramesCommand.CanExecute(items)) ViewModel.RemoveFramesCommand.Execute(items);
     }
+
+    // ---- IImageSurface ----
+
+    public void Show(PreviewImage image, double sourceWidth) => LiveView.Show(image, sourceWidth);
+
+    public void FlashTrails(IReadOnlyList<LineSegment> previewCoords) => LiveView.FlashTrails(previewCoords);
+
+    public void BringIntoView(object frame) => Strip.ScrollIntoView(frame);
 
     // ---- IFilePickers (unpackaged: every picker needs the window handle) ----
 

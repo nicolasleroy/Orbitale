@@ -1,33 +1,57 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Xaml.Media;
 using Orbitale.App.Services;
 using Orbitale.Engine.Blending;
 using Orbitale.Engine.Frames;
+using Orbitale.Engine.Imaging;
 using Orbitale.Engine.Settings;
 using Orbitale.Engine.Stacking;
+using LineSegment = Orbitale.Engine.Trails.LineSegment;
 
 namespace Orbitale.App.ViewModels;
 
 /// <summary>
 /// The main window's state: the run settings (sliders in percent, mapped to 0..1 in <see cref="StackSettings"/>), the
-/// frame list and the session's commands. All image work stays in the engine; this class only orchestrates it.
+/// frame list, the live run and the session's commands. All image work stays in the engine and runs off the UI thread;
+/// this class only orchestrates it. Every member is used on the UI thread; engine callbacks are marshalled to it.
 /// </summary>
 public partial class MainViewModel : ObservableObject
 {
     static readonly string[] FrameExtensions = [".jpg", ".jpeg", ".tif", ".tiff"];
     const uint ThumbnailSize = 160;
 
+    /// <summary>What every progress report contributes to the UI even when its preview is coalesced away.</summary>
+    readonly record struct FrameStep(int FileIndex, int Trails, IReadOnlyList<LineSegment> RemovedTrails, string? Notice);
+
     readonly IFilePickers _pickers;
+    readonly IImageSurface _surface;
+    readonly IUiDispatcher _ui;
     readonly ThumbnailQueue<ImageSource> _thumbnails;
     readonly StackSession _session;
     readonly StackSettings _loadedStack;
+    readonly NoticeLog _notices = new();
     FrameSequence? _sequence;
 
-    public MainViewModel(IFilePickers pickers, StackSession session, AppSettings settings)
+    // The current or last run.
+    FrameSequence? _runSequence;
+    FrameStateTracker? _tracker;
+    CoalescingProgress<StackProgress, FrameStep>? _progress;
+    StackProgress? _lastProgress;
+    long _stopRequested;
+
+    // What the image view shows: every request bumps the version, so a slow render never replaces a newer view.
+    int _viewVersion;
+    FrameItem? _requestedFrame;
+    bool _loadingFrame;
+
+    public MainViewModel(IFilePickers pickers, IImageSurface surface, IUiDispatcher ui, StackSession session, AppSettings settings)
     {
         _pickers = pickers;
+        _surface = surface;
+        _ui = ui;
         _thumbnails = new ThumbnailQueue<ImageSource>(
             (path, token) => ThumbnailLoader.LoadAsync(path, ThumbnailSize, token),
             (path, e) => Diagnostics.Log($"Thumbnail failed for {path}: {e.GetType().Name}: {e.Message}"));
@@ -101,17 +125,32 @@ public partial class MainViewModel : ObservableObject
     public ObservableCollection<FrameItem> Frames { get; } = [];
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanEditSettings), nameof(CanUseLightenOptions), nameof(CanEditFrames))]
+    [NotifyPropertyChangedFor(nameof(CanEditSettings), nameof(CanUseLightenOptions), nameof(CanEditFrames), nameof(IsBackVisible))]
     [NotifyCanExecuteChangedFor(nameof(AddFramesCommand), nameof(AddFrameFilesCommand), nameof(RemoveFramesCommand))]
     public partial bool IsRunning { get; set; }
 
     /// <summary>True while a frame list is being validated (headers read off the UI thread).</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanEditFrames))]
+    [NotifyPropertyChangedFor(nameof(CanEditFrames), nameof(IsBusy))]
     [NotifyCanExecuteChangedFor(nameof(AddFramesCommand), nameof(AddFrameFilesCommand), nameof(RemoveFramesCommand), nameof(StartCommand))]
     public partial bool IsLoadingFrames { get; set; }
 
-    public bool CanEditFrames => !IsRunning && !IsLoadingFrames;
+    /// <summary>True while the result is written to disk (off the UI thread).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanEditFrames), nameof(IsBusy))]
+    [NotifyCanExecuteChangedFor(nameof(AddFramesCommand), nameof(AddFrameFilesCommand), nameof(RemoveFramesCommand), nameof(StartCommand), nameof(SaveCommand))]
+    public partial bool IsSaving { get; set; }
+
+    /// <summary>True while the full-resolution result is rendered for the view (off the UI thread).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsBusy))]
+    [NotifyCanExecuteChangedFor(nameof(StartCommand))]
+    public partial bool IsRenderingResult { get; set; }
+
+    public bool CanEditFrames => RunGate.CanEditFrames(_session.State, IsLoadingFrames, IsSaving);
+
+    /// <summary>Something without a percentage is in progress (the status bar's indeterminate bar).</summary>
+    public bool IsBusy => IsLoadingFrames || IsSaving || IsRenderingResult;
 
     [ObservableProperty]
     public partial string StatusText { get; set; }
@@ -122,6 +161,17 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial string Hint { get; set; } = "Add frames to begin";
 
+    /// <summary>The image view's badge: the live count, the result, or the original frame shown.</summary>
+    [ObservableProperty]
+    public partial string BadgeText { get; set; } = "";
+
+    /// <summary>An original frame is shown instead of the result.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsBackVisible))]
+    public partial bool IsViewingFrame { get; set; }
+
+    public bool IsBackVisible => IsViewingFrame && !IsRunning && _session.Result is not null;
+
     /// <summary>The skipped frames of the last Add or Remove, one per line ("file — reason").</summary>
     [ObservableProperty]
     public partial string SkippedMessage { get; set; } = "";
@@ -131,6 +181,29 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     public partial string SkippedTitle { get; set; } = "";
+
+    /// <summary>The run's latest notice (informational InfoBar), titled with the count when there were several.</summary>
+    [ObservableProperty]
+    public partial bool ShowNotice { get; set; }
+
+    [ObservableProperty]
+    public partial string NoticeTitle { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string NoticeText { get; set; } = "";
+
+    /// <summary>The outcome of a save or a failed run (success or error InfoBar).</summary>
+    [ObservableProperty]
+    public partial bool ShowMessage { get; set; }
+
+    [ObservableProperty]
+    public partial bool MessageIsError { get; set; }
+
+    [ObservableProperty]
+    public partial string MessageTitle { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string MessageText { get; set; } = "";
 
     // ---- Commands ----
 
@@ -184,31 +257,157 @@ public partial class MainViewModel : ObservableObject
         await RebuildAsync(Frames.Select(f => f.Path).Where(p => !removed.Contains(p)));
     }
 
-    bool CanStart() => _session.CanStart && _sequence is not null && !IsLoadingFrames;
+    bool CanStart() => RunGate.CanStart(_session.State, _sequence is not null, IsLoadingFrames, IsSaving || IsRenderingResult);
 
-    /// <summary>Runs the stack. The live run (progress, preview, frame states) is wired together with the live image view.</summary>
+    /// <summary>
+    /// Runs the stack from the first frame. Progress is coalesced (latest preview wins, every frame's state change is
+    /// kept) and applied on the UI thread; at the end the full-resolution result replaces the preview.
+    /// </summary>
     [RelayCommand(CanExecute = nameof(CanStart))]
-    Task StartAsync() => Task.CompletedTask;
+    async Task StartAsync()
+    {
+        if (_sequence is null || !CanStart()) return;
+        var seq = _sequence;
+        _runSequence = seq;
+        _viewVersion++;   // a frame or result still rendering must not replace the live view
+        _requestedFrame = null;
+        IsViewingFrame = false;
+        _tracker = new FrameStateTracker(Frames.ToList());
+        _tracker.Reset();
+        _lastProgress = null;
+        _notices.Clear();
+        ShowNotice = false;
+        ShowMessage = false;
+        ProgressPercent = 0;
+        StatusText = $"Starting · {seq.Files.Count} frames…";
+        BadgeText = RunText.LiveBadge(0, seq.Files.Count);
+        Hint = "Stacking…";
 
-    bool CanStop() => _session.CanStop;
+        _progress?.Close();
+        var progress = new CoalescingProgress<StackProgress, FrameStep>(_ui,
+            p => new FrameStep(p.FileIndex, p.TrailsInFrame, p.RemovedTrailsPreviewCoords, p.Notice), ApplyProgress);
+        _progress = progress;
+        var settings = ToStackSettings();
+        Diagnostics.Log($"Run started: {seq.Files.Count} frames, {settings}");
+        try
+        {
+            await _session.StartAsync(seq, settings, progress);
+        }
+        catch (Exception e)
+        {
+            progress.Close();
+            _tracker.Finish();
+            Diagnostics.Log($"Run failed: {e}");
+            StatusText = "The run failed";
+            BadgeText = "";
+            Hint = $"Press Start to stack {seq.Files.Count} frames";
+            ShowError("The run failed", e.Message);
+            return;
+        }
+        progress.Flush();   // the last frames' states, before the end of the run is shown
+        progress.Close();
+        await OnRunEndedAsync(seq);
+    }
 
     [RelayCommand(CanExecute = nameof(CanStop))]
-    void Stop() => _session.Stop();
+    void Stop()
+    {
+        _stopRequested = Stopwatch.GetTimestamp();
+        Diagnostics.Log("Stop requested");
+        _session.Stop();
+    }
 
-    bool CanSave() => _session.CanSave;
+    bool CanStop() => RunGate.CanStop(_session.State);
 
+    bool CanSave() => RunGate.CanSave(_session.State, _session.Result is not null, IsSaving);
+
+    /// <summary>Writes the result (JPG or 16-bit TIFF, by the chosen type) off the UI thread.</summary>
     [RelayCommand(CanExecute = nameof(CanSave))]
     async Task SaveAsync()
     {
-        var first = _sequence?.Files.FirstOrDefault();
-        var name = (first is null ? "orbitale" : Path.GetFileNameWithoutExtension(first) + "_orbitale") + "." + LastOutputFormat;
+        var name = RunText.DefaultSaveName((_runSequence ?? _sequence)?.Files.FirstOrDefault(), LastOutputFormat);
         var path = await _pickers.PickSaveFileAsync(name, LastOutputFormat);
-        if (path is null) return;
+        // The picker is modal but the state may have changed meanwhile: re-check before touching the result.
+        if (path is null || !CanSave() || _session.Result is not { } result) return;
         LastOutputFolder = Path.GetDirectoryName(path);
         var ext = Path.GetExtension(path).ToLowerInvariant();
         LastOutputFormat = ext is ".jpg" or ".jpeg" ? "jpg" : "tif";
-        // Writing the result is wired with the live run.
+
+        IsSaving = true;   // Start (which disposes the result), Add and Save stay disabled until the write is done
+        var status = StatusText;
+        StatusText = $"Saving {Path.GetFileName(path)}…";
+        ShowMessage = false;
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            await Task.Run(() => result.Save(path));
+            Diagnostics.Log($"Saved {path} in {clock.ElapsedMilliseconds} ms");
+            MessageIsError = false;
+            MessageTitle = "Saved";
+            MessageText = path;
+            ShowMessage = true;
+        }
+        catch (Exception e)
+        {
+            Diagnostics.Log($"Save failed for {path}: {e}");
+            ShowError("Could not save", $"{path}: {e.Message}");
+        }
+        finally
+        {
+            StatusText = status;
+            IsSaving = false;
+        }
     }
+
+    /// <summary>Shows the original frame (full resolution, decoded off the UI thread); ignored during a run.</summary>
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    async Task ViewFrameAsync(FrameItem? item)
+    {
+        if (item is null || !RunGate.CanViewFrame(_session.State)) return;
+        _requestedFrame = item;
+        _viewVersion++;
+        BadgeText = $"{item.FileName} · loading…";
+        if (_loadingFrame) return;   // the running load picks up the latest request when it ends
+
+        // One decode at a time (a 40 MP frame is ~0.5 GB as float): clicks while loading only keep the latest frame.
+        _loadingFrame = true;
+        try
+        {
+            while (_requestedFrame is { } next)
+            {
+                _requestedFrame = null;
+                int version = _viewVersion;
+                try
+                {
+                    var image = await Task.Run(() =>
+                    {
+                        using var frame = ImageReader.Read(next.Path);
+                        return Preview.Render(frame, 0);
+                    });
+                    if (version != _viewVersion) continue;
+                    _surface.Show(image, image.Width);
+                    BadgeText = next.FileName;
+                    IsViewingFrame = true;
+                }
+                catch (Exception e)
+                {
+                    Diagnostics.Log($"Cannot show {next.Path}: {e}");
+                    if (version == _viewVersion)
+                    {
+                        BadgeText = "";
+                        ShowError("Cannot show the frame", $"{next.FileName}: {e.Message}");
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _loadingFrame = false;
+        }
+    }
+
+    [RelayCommand]
+    Task BackToResultAsync() => ShowResultAsync();
 
     // ---- Thumbnails ----
 
@@ -220,21 +419,99 @@ public partial class MainViewModel : ObservableObject
 
     // ---- Settings snapshot ----
 
-    public StackSettings ToStackSettings() => _loadedStack with
-    {
-        Mode = Mode,
-        Comet = Comet,
-        CometStrength = CometStrength / 100,
-        HeadAtStart = HeadAtStart,
-        GapFill = GapFill,
-        GapFillStrength = GapFillStrength / 100,
-        RemoveTrails = RemoveTrails,
-        TrailSensitivity = TrailSensitivity / 100,
-    };
+    /// <summary>The settings a run uses (comet and gap filling off outside Lighten).</summary>
+    public StackSettings ToStackSettings() => StackSettingsMapper.ForRun(ToolbarSettings());
 
-    public AppSettings ToAppSettings() => new(ToStackSettings(), LastInputFolder, LastOutputFolder, LastOutputFormat);
+    /// <summary>The settings as the toolbar shows them (remembered as is, so switching modes loses nothing).</summary>
+    public AppSettings ToAppSettings() => new(ToolbarSettings(), LastInputFolder, LastOutputFolder, LastOutputFormat);
+
+    StackSettings ToolbarSettings() => StackSettingsMapper.FromPercent(_loadedStack, Mode, Comet, CometStrength, HeadAtStart,
+        GapFill, GapFillStrength, RemoveTrails, TrailSensitivity);
 
     // ---- Internals ----
+
+    /// <summary>Applies coalesced progress on the UI thread: every frame's state, then the latest preview.</summary>
+    void ApplyProgress(IReadOnlyList<FrameStep> steps, StackProgress latest)
+    {
+        if (_tracker is null || _runSequence is null) return;
+        IFrameStatus? current = null;
+        foreach (var step in steps)
+        {
+            current = _tracker.Advance(step.FileIndex, step.Trails) ?? current;
+            if (_notices.Add(step.Notice))
+            {
+                NoticeTitle = _notices.Title;
+                NoticeText = _notices.Latest!;
+                ShowNotice = true;
+            }
+        }
+        if (_tracker.Current is { } now) _surface.BringIntoView(now);
+        else if (current is not null) _surface.BringIntoView(current);
+
+        _lastProgress = latest;
+        StatusText = RunText.Status(latest);
+        ProgressPercent = RunText.Percent(latest.Processed, latest.Total);
+        BadgeText = RunText.LiveBadge(latest.Processed, latest.Total);
+        _surface.Show(latest.Preview, _runSequence.Width);
+        // Every coalesced frame's trails share the preview's coordinates, so none is lost.
+        var trails = steps.Count == 1 ? steps[0].RemovedTrails : steps.SelectMany(s => s.RemovedTrails).ToList();
+        if (trails.Count > 0) _surface.FlashTrails(trails);
+    }
+
+    async Task OnRunEndedAsync(FrameSequence seq)
+    {
+        _tracker?.Finish();
+        if (_session.Result is not { } result) return;
+        if (_stopRequested != 0)
+        {
+            Diagnostics.Log($"Run stopped {Stopwatch.GetElapsedTime(_stopRequested).TotalMilliseconds:F0} ms after Stop, at {result.FramesProcessed} / {seq.Files.Count}");
+            _stopRequested = 0;
+        }
+        else Diagnostics.Log($"Run finished: {result.FramesProcessed} frames");
+        int trails = _lastProgress?.TrailsTotal ?? 0;
+        StatusText = result.Completed ? RunText.Finished(result.FramesProcessed, trails) : RunText.Stopped(result.FramesProcessed, seq.Files.Count);
+        ProgressPercent = RunText.Percent(result.FramesProcessed, seq.Files.Count);
+        await ShowResultAsync();
+    }
+
+    /// <summary>Shows the result at full resolution (rendered off the UI thread; Start waits for it, as it disposes the result).</summary>
+    async Task ShowResultAsync()
+    {
+        if (_session.Result is not { } result || IsRunning || _runSequence is not { } seq) return;
+        int version = ++_viewVersion;
+        _requestedFrame = null;
+        var badge = RunText.ResultBadge(result.Completed, result.FramesProcessed, seq.Files.Count);
+        BadgeText = $"{badge} · rendering full resolution…";
+        IsRenderingResult = true;
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            var image = await Task.Run(result.RenderFull);
+            if (version != _viewVersion) return;
+            long rendered = clock.ElapsedMilliseconds;
+            _surface.Show(image, image.Width);
+            Diagnostics.Log($"Full-resolution view {image.Width} x {image.Height}: rendered in {rendered} ms, shown in {clock.ElapsedMilliseconds - rendered} ms");
+            BadgeText = badge;
+            IsViewingFrame = false;
+        }
+        catch (Exception e)
+        {
+            Diagnostics.Log($"Full-resolution view failed: {e}");
+            if (version == _viewVersion) BadgeText = badge;   // the preview stays
+        }
+        finally
+        {
+            IsRenderingResult = false;
+        }
+    }
+
+    void ShowError(string title, string message)
+    {
+        MessageIsError = true;
+        MessageTitle = title;
+        MessageText = message;
+        ShowMessage = true;
+    }
 
     /// <summary>Validates <paramref name="paths"/> with <see cref="FrameSequence.Build"/> off the UI thread and refreshes the strip.</summary>
     async Task RebuildAsync(IEnumerable<string> paths)
@@ -257,7 +534,13 @@ public partial class MainViewModel : ObservableObject
             Frames.Clear();
             foreach (var path in seq?.Files ?? [])
             {
-                if (existing.Remove(path, out var item)) Frames.Add(item);
+                if (existing.Remove(path, out var item))
+                {
+                    // A new list is a new sequence: the last run's states no longer apply.
+                    if (item.State != FrameState.Skipped) item.State = FrameState.Pending;
+                    item.TrailCount = 0;
+                    Frames.Add(item);
+                }
                 else Frames.Add(new FrameItem(path));
             }
             foreach (var removed in existing.Values) _thumbnails.Cancel(removed);
@@ -284,11 +567,23 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>The session raises this on whichever thread changed the state: refresh on the UI thread.</summary>
     void OnSessionStateChanged()
     {
-        IsRunning = _session.State is SessionState.Running or SessionState.Stopping;
+        if (_ui.HasThreadAccess) RefreshSessionState();
+        else _ui.TryEnqueue(RefreshSessionState);
+    }
+
+    void RefreshSessionState()
+    {
+        IsRunning = RunGate.IsRunning(_session.State);
+        OnPropertyChanged(nameof(CanEditFrames));
+        OnPropertyChanged(nameof(IsBackVisible));
         StartCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
         SaveCommand.NotifyCanExecuteChanged();
+        AddFramesCommand.NotifyCanExecuteChanged();
+        AddFrameFilesCommand.NotifyCanExecuteChanged();
+        RemoveFramesCommand.NotifyCanExecuteChanged();
     }
 }

@@ -20,8 +20,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- UI-free scheduling class of the WinUI app, compiled in here so it can be unit-tested without hosting WinUI. -->
+    <!-- UI-free classes of the WinUI app, compiled in here so they can be unit-tested without hosting WinUI. -->
     <Compile Include="..\..\src\Orbitale.App\Services\ThumbnailQueue.cs" Link="App\ThumbnailQueue.cs" />
+    <Compile Include="..\..\src\Orbitale.App\Services\CoalescingProgress.cs" Link="App\CoalescingProgress.cs" />
+    <Compile Include="..\..\src\Orbitale.App\ViewModels\FrameStateTracker.cs" Link="App\FrameStateTracker.cs" />
+    <Compile Include="..\..\src\Orbitale.App\ViewModels\RunRules.cs" Link="App\RunRules.cs" />
   </ItemGroup>
 
   <ItemGroup>
