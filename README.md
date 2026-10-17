@@ -2,6 +2,8 @@
 
 Orbitale is a Windows 11 app that stacks a night-sky frame sequence into a star-trail (or circumpolar) image. It removes plane and satellite trails automatically, offers Lighten, Darken and Average blending, a comet style and gap filling, and shows the result building up live.
 
+![Orbitale stacking a 279-frame sequence live: the star trails build up while removed plane and satellite trails flash in amber, and each thumbnail shows how many trails were removed from that frame](docs/images/orbitale-live-run.webp)
+
 ## What it does
 
 1. Export your frames as JPG or TIFF from Photoshop (or any other tool).
