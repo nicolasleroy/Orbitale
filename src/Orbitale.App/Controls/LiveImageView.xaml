@@ -3,7 +3,7 @@
     x:Class="Orbitale.App.Controls.LiveImageView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid Background="#FF07090F">
+    <Grid Background="{StaticResource WindowBackgroundBrush}">
         <!-- Zoom 1 = one source pixel per physical pixel (the surface is sized in DIPs for that). -->
         <ScrollViewer
             x:Name="Scroller"

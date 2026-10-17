@@ -6,11 +6,46 @@
     xmlns:controls="using:Orbitale.App.Controls"
     xmlns:vm="using:Orbitale.App.ViewModels"
     Title="Orbitale">
-    <Window.SystemBackdrop>
-        <MicaBackdrop />
-    </Window.SystemBackdrop>
 
-    <Grid x:Name="Root" RequestedTheme="Dark">
+    <!-- One flat background from the title bar down, like Microsoft Photos; the toolbar sits in the title bar. -->
+    <Grid x:Name="Root" Background="{StaticResource WindowBackgroundBrush}" RequestedTheme="Dark">
+        <Grid.Resources>
+            <ResourceDictionary>
+                <ResourceDictionary.ThemeDictionaries>
+                    <!-- Toggled-on toolbar buttons stay neutral (a lighter fill) instead of the Windows accent colour. -->
+                    <ResourceDictionary x:Key="Default">
+                        <SolidColorBrush x:Key="SplitButtonBackgroundChecked" Color="#40FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedPointerOver" Color="#4DFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedPressed" Color="#30FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedDisabled" Color="#14FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundChecked" Color="#FFFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedPointerOver" Color="#FFFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedPressed" Color="#C8FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedDisabled" Color="#5DFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushChecked" Color="#33FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedPointerOver" Color="#40FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedPressed" Color="#26FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedDisabled" Color="#14FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedDivider" Color="#33FFFFFF" />
+                    </ResourceDictionary>
+                    <ResourceDictionary x:Key="Dark">
+                        <SolidColorBrush x:Key="SplitButtonBackgroundChecked" Color="#40FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedPointerOver" Color="#4DFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedPressed" Color="#30FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBackgroundCheckedDisabled" Color="#14FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundChecked" Color="#FFFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedPointerOver" Color="#FFFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedPressed" Color="#C8FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonForegroundCheckedDisabled" Color="#5DFFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushChecked" Color="#33FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedPointerOver" Color="#40FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedPressed" Color="#26FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedDisabled" Color="#14FFFFFF" />
+                        <SolidColorBrush x:Key="SplitButtonBorderBrushCheckedDivider" Color="#33FFFFFF" />
+                    </ResourceDictionary>
+                </ResourceDictionary.ThemeDictionaries>
+            </ResourceDictionary>
+        </Grid.Resources>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -20,11 +55,16 @@
         </Grid.RowDefinitions>
 
         <!-- 1. Toolbar -->
-        <Grid Grid.Row="0" Padding="12,8" ColumnSpacing="8">
+        <Grid x:Name="Toolbar" Grid.Row="0" MinHeight="48" Padding="8,6,0,6" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" MinWidth="32" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition x:Name="CaptionColumn" Width="138" />
             </Grid.ColumnDefinitions>
+
+            <!-- The empty stretch of the toolbar is where the window is dragged from. -->
+            <Border x:Name="DragRegion" Grid.Column="1" Background="Transparent" />
 
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <SplitButton
@@ -140,7 +180,7 @@
                 </ToggleSplitButton>
             </StackPanel>
 
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
                 <Button
                     MinWidth="96"
                     AutomationProperties.Name="Start"

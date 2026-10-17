@@ -36,6 +36,16 @@ dotnet publish src/Orbitale.App -c Release -r win-x64 --self-contained
 
 The result is in `src\Orbitale.App\bin\Release\net10.0-windows10.0.22621.0\win-x64\publish\`. Run `Orbitale.exe` from there, or copy the whole folder anywhere.
 
+### Installer
+
+`build-installer.ps1` runs the tests, publishes the app and builds `dist\Orbitale-Setup-<version>.exe` with [Inno Setup 6](https://jrsoftware.org/isinfo.php) (install it once with `winget install --id JRSoftware.InnoSetup -e`):
+
+```
+powershell -ExecutionPolicy Bypass -File build-installer.ps1
+```
+
+Add `-SkipTests` to skip the tests. The version comes from `<Version>` in `src\Orbitale.App\Orbitale.App.csproj`. The setup installs for the current user without admin rights (or for all users, if chosen), adds a Start menu entry and an optional desktop icon, and comes with an uninstaller; settings in `%LOCALAPPDATA%\Orbitale` are kept on uninstall.
+
 ## Running
 
 **The app:** start `Orbitale.exe` (from the publish folder), or `dotnet run --project src/Orbitale.App -c Release`.

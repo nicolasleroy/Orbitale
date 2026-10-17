@@ -38,6 +38,7 @@ public partial class MainViewModel : ObservableObject
 
     // The current or last run.
     FrameSequence? _runSequence;
+    bool _runRemovesTrails;
     FrameStateTracker? _tracker;
     CoalescingProgress<StackProgress, FrameStep>? _progress;
     StackProgress? _lastProgress;
@@ -293,6 +294,7 @@ public partial class MainViewModel : ObservableObject
             p => new FrameStep(p.FileIndex, p.TrailsInFrame, p.RemovedTrailsPreviewCoords, p.Notice), ApplyProgress);
         _progress = progress;
         var settings = ToStackSettings();
+        _runRemovesTrails = settings.RemoveTrails;
         Diagnostics.Log($"Run started: {seq.Files.Count} frames, {settings}");
         try
         {
@@ -543,7 +545,8 @@ public partial class MainViewModel : ObservableObject
         if (result.TrailRemovalSkipped > 0) Diagnostics.Log($"Trail removal skipped on {result.TrailRemovalSkipped} frames: sky alignment failed");
         int trails = _lastProgress?.TrailsTotal ?? 0;
         StatusText = result.Completed
-            ? RunText.Finished(result.FramesProcessed, trails, result.TrailRemovalSkipped)
+            ? RunText.Finished(result.FramesProcessed, trails, result.TrailRemovalSkipped,
+                framesWithoutTrails: Frames.Count(f => f.State == FrameState.Done), trailRemovalOn: _runRemovesTrails)
             : RunText.Stopped(result.FramesProcessed, seq.Files.Count, result.TrailRemovalSkipped);
         ProgressPercent = RunText.Percent(result.FramesProcessed, seq.Files.Count);
         await ShowResultAsync();

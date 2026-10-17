@@ -6,6 +6,9 @@
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>Orbitale.App</RootNamespace>
     <AssemblyName>Orbitale</AssemblyName>
+    <!-- The installer (build-installer.ps1) takes its version from here. -->
+    <Version>1.0.0</Version>
+    <Product>Orbitale</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Orbitale.ico</ApplicationIcon>
     <Platforms>x64</Platforms>

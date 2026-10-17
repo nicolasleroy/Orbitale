@@ -122,6 +122,17 @@ public sealed class RunTextTests
     }
 
     [Fact]
+    public void Done_text_adds_trail_statistics_when_trails_were_removed()
+    {
+        Assert.Equal("Done · 279 frames · 1515 trails removed · 17 % of frames without trails · 5.4 trails per frame on average",
+            RunText.Finished(279, 1515, framesWithoutTrails: 47));
+        Assert.Equal("Done · 4 frames · 0 trails removed · 100 % of frames without trails · 0.0 trails per frame on average",
+            RunText.Finished(4, 0, framesWithoutTrails: 4));
+        // Trail removal off: no statistics to give.
+        Assert.Equal("Done · 279 frames", RunText.Finished(279, 0, framesWithoutTrails: null, trailRemovalOn: false));
+    }
+
+    [Fact]
     public void Badges_and_percent()
     {
         Assert.Equal("Live · frame 141 / 279", RunText.LiveBadge(141, 279));

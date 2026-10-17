@@ -62,8 +62,18 @@ public static class RunText
         return p.Eta is { } eta && eta > TimeSpan.Zero && p.Processed < p.Total ? $"{text} · ~{TimeLeft(eta)} left" : text;
     }
 
-    public static string Finished(int frames, int trails, int trailRemovalSkipped = 0) =>
-        $"Done · {Plural(frames, "frame")} · {Trails(trails)}" + Skipped(trailRemovalSkipped);
+    /// <summary>
+    /// The end-of-run summary. With <paramref name="framesWithoutTrails"/> it adds the share of frames that had no trail
+    /// to remove and the mean number of trails per frame; without trail removal there is nothing to count.
+    /// </summary>
+    public static string Finished(int frames, int trails, int trailRemovalSkipped = 0, int? framesWithoutTrails = null, bool trailRemovalOn = true)
+    {
+        if (!trailRemovalOn) return $"Done · {Plural(frames, "frame")}";
+        var text = $"Done · {Plural(frames, "frame")} · {Trails(trails)}";
+        if (framesWithoutTrails is { } clean && frames > 0)
+            text += FormattableString.Invariant($" · {Math.Round(100.0 * clean / frames, MidpointRounding.AwayFromZero):0} % of frames without trails · {(double)trails / frames:0.0} trails per frame on average");
+        return text + Skipped(trailRemovalSkipped);
+    }
 
     public static string Stopped(int processed, int total, int trailRemovalSkipped = 0) =>
         $"Stopped at {processed} / {total} · result kept" + Skipped(trailRemovalSkipped);

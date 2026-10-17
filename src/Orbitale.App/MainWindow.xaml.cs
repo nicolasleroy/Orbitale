@@ -23,7 +23,7 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
         ViewModel = new MainViewModel(this, this, new DispatcherQueueUi(DispatcherQueue), new StackSession(), SettingsStore.Load());
 
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Orbitale.ico"));
-        AppWindow.TitleBar.PreferredTheme = TitleBarTheme.Dark;
+        ExtendTitleBar();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1400, 900));
         AppWindow.Closing += AppWindow_Closing;
         ViewModel.SaveEnded += () => _ = TryCloseAsync();
@@ -36,6 +36,30 @@ public sealed partial class MainWindow : Window, IFilePickers, IImageSurface
     }
 
     public MainViewModel ViewModel { get; }
+
+    /// <summary>
+    /// Like Microsoft Photos: no title text, the toolbar is the title bar and the whole window has one background.
+    /// The caption buttons draw over the toolbar's last column, sized to them; the toolbar's empty stretch drags the window.
+    /// </summary>
+    void ExtendTitleBar()
+    {
+        var bar = AppWindow.TitleBar;
+        bar.ExtendsContentIntoTitleBar = true;
+        bar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        bar.PreferredTheme = TitleBarTheme.Dark;
+        var transparent = Microsoft.UI.Colors.Transparent;
+        bar.ButtonBackgroundColor = transparent;
+        bar.ButtonInactiveBackgroundColor = transparent;
+        SetTitleBar(DragRegion);
+
+        void FitCaptionButtons()
+        {
+            double scale = Content.XamlRoot?.RasterizationScale ?? 1;
+            CaptionColumn.Width = new GridLength(Math.Max(0, bar.RightInset / scale));
+        }
+        Root.Loaded += (_, _) => FitCaptionButtons();
+        AppWindow.Changed += (_, _) => FitCaptionButtons();
+    }
 
     // ---- Closing ----
 
