@@ -92,12 +92,13 @@ public static class SettingsStore
     /// Settings saved before the comet fade: a strength (a tail that decayed to 1 % over the last 10–100 % of the
     /// sequence) and a head at the end or the start. A fade cannot reproduce a short tail that is dark before it starts,
     /// so they become the classic comet with the same head: (1, 1), or (0, 0) with the head at the start; the strength is
-    /// dropped. Files that already have a fade, or no comet settings at all, are left as they are.
+    /// dropped. Files that already have a fade, or whose comet was off, are left as they are (so they get the default fade).
     /// </summary>
     static AppSettings MigrateComet(AppSettings s, JsonNode? json)
     {
         if (s.Stack is null || json?["Stack"] is not JsonObject stack) return s;
         if (stack.ContainsKey(nameof(StackSettings.CometFadeIn)) || stack.ContainsKey(nameof(StackSettings.CometFadeOut))) return s;
+        if (!s.Stack.Comet) return s;   // 1.0 always saved a strength: only a comet that was on is carried over
         bool headAtStart = stack["HeadAtStart"] is JsonValue hv && hv.TryGetValue(out bool h) && h;
         if (!stack.ContainsKey("CometStrength") && !headAtStart) return s;
         double head = headAtStart ? 0 : 1;

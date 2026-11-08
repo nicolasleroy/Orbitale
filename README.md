@@ -17,7 +17,8 @@ Orbitale is a Windows 11 app that stacks a night-sky frame sequence into a star-
 
 - **Trail removal.** For each frame, the sky of its neighbouring frames is rotated into place, with lens distortion corrected. Anything new and line-shaped (a plane or satellite) is repaired with the real sky from those neighbours. This sky alignment only serves to find and repair trails: the stack itself is not aligned (a fixed tripod is assumed), so the stars still draw their trails.
 - **Blend modes.** Lighten, Darken or Average.
-- **Comet style.** A two-handle slider sets how the trails fade in and fade out along the sequence: the trails grow from nothing up to the left handle, stay at full brightness between the handles, and fade away after the right handle. Both handles at the right end give the classic comet with its head at the end; both at the left end put the head at the start.
+- **Comet style.** A two-handle slider sets how the trails fade in and fade out along the sequence: the trails grow from nothing up to the left handle, stay at full brightness between the handles, and fade away after the right handle. Both handles at the right end give the classic comet with its head at the end; both at the left end put the head at the start. A comet saved by version 1.0 opens as the classic comet with the same head (its old strength setting has no equivalent).
+- **Zoom and loupe.** Ctrl+wheel or pinch zooms the image, and a double-click switches between fit and 100 %. A click on the image opens a loupe that shows it at 100 % around that point; drag on the image or drag the loupe to move it, and close it with its button or Escape.
 - **Gap filling.** A strength setting.
 - **Frame list.** Frames can be removed from the list before a run.
 - **Remembered settings and folders.** Your settings are kept between sessions. The frame pickers open in the folder you last added frames from, and the save dialog in the folder you last saved to.

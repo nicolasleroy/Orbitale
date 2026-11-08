@@ -116,6 +116,19 @@ public sealed class SettingsStoreTests : IDisposable
         Assert.Equal(fadeOut, loaded.Stack.CometFadeOut, 6);
     }
 
+    [Fact]
+    public void A_comet_that_was_off_gets_the_default_fade()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        File.WriteAllText(FilePath, "{\"Stack\": {\"Comet\": false, \"CometStrength\": 0.5, \"HeadAtStart\": false}}");   // as 1.0 saved it
+
+        var loaded = SettingsStore.Load(FilePath);
+
+        var defaults = new StackSettings();
+        Assert.Equal(defaults.CometFadeIn, loaded.Stack.CometFadeIn);
+        Assert.Equal(defaults.CometFadeOut, loaded.Stack.CometFadeOut);
+    }
+
     [Theory]
     [InlineData(1, 1)]
     [InlineData(3, 3)]
