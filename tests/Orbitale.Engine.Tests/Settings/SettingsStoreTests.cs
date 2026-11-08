@@ -100,9 +100,9 @@ public sealed class SettingsStoreTests : IDisposable
     }
 
     [Theory]
-    [InlineData("\"CometStrength\": 0.5", 0.55, 1.0)]                        // tail over 55 % of the sequence, head at the end
-    [InlineData("\"CometStrength\": 1, \"HeadAtStart\": true", 0.0, 0.9)]   // tail over 10 %, head at the start
-    [InlineData("\"HeadAtStart\": true", 0.0, 0.45)]                         // the old default strength
+    [InlineData("\"CometStrength\": 0.5", 1.0, 1.0)]                        // the classic comet, head at the end
+    [InlineData("\"CometStrength\": 1, \"HeadAtStart\": true", 0.0, 0.0)]   // the classic comet, head at the start
+    [InlineData("\"HeadAtStart\": true", 0.0, 0.0)]                          // no strength saved: same
     [InlineData("\"CometStrength\": 0.5, \"CometFadeIn\": 0.2", 0.2, 1.0)] // already has a fade: kept
     public void Settings_from_before_the_fade_are_migrated(string stack, double fadeIn, double fadeOut)
     {

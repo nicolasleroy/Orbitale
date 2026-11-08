@@ -68,12 +68,12 @@ internal sealed class StackRun
         bool completed = false;
         try
         {
-            for (int p = 0; ; p++)
+            for (int i = 0; ; i++)
             {
                 // All frames first: a Stop during the last frame's report still completes the run.
-                if (p == _n) { completed = true; break; }
+                if (i == _n) { completed = true; break; }
                 if (_ct.IsCancellationRequested) break;
-                if (!ProcessFrame(p, window, acc, clock)) break;
+                if (!ProcessFrame(i, window, acc, clock)) break;
             }
         }
         catch
@@ -124,10 +124,9 @@ internal sealed class StackRun
         return new ImageMetadata();
     }
 
-    /// <summary>Processes the frame at position <paramref name="p"/> of the run. Returns false when cancelled mid-frame.</summary>
-    bool ProcessFrame(int p, FrameWindow window, IAccumulator acc, Stopwatch clock)
+    /// <summary>Processes file <paramref name="i"/> (frames are processed in file order). Returns false when cancelled mid-frame.</summary>
+    bool ProcessFrame(int i, FrameWindow window, IAccumulator acc, Stopwatch clock)
     {
-        int i = p;   // frames are processed in file order
         long t0 = Stopwatch.GetTimestamp();
 
         // 1. Decode the frame and its neighbours (by file index), then start decoding what the next frame adds.
@@ -144,7 +143,7 @@ internal sealed class StackRun
         int[] neighbourIdx = _k > 0 ? NeighbourWindow.Indices(i, _n, _k) : [];
         foreach (int j in neighbourIdx)
             if (TryGet(window, j) is { } m) neighbours.Add((j, m));
-        PrefetchNext(p, i, neighbourIdx, window);
+        PrefetchNext(i, neighbourIdx, window);
         long t1 = Stopwatch.GetTimestamp();
 
         // 2. Sky alignment of each neighbour into this frame, then trail removal. Owned: the cleaned frame,
@@ -170,9 +169,9 @@ internal sealed class StackRun
             }
             finally
             {
-                ForgetSkyMotionOutside(p, i, neighbourIdx);
+                ForgetSkyMotionOutside(i, neighbourIdx);
             }
-            StartAlignStars(p, window);
+            StartAlignStars(i, window);
         }
         work ??= _gapFiller is not null ? frame.Clone() : frame;
         bool owned = !ReferenceEquals(work, frame);
@@ -194,8 +193,7 @@ internal sealed class StackRun
             if (_ct.IsCancellationRequested) return false;
 
             // 4. Blend.
-            if (acc is CometAccumulator comet) comet.Add(work, i);   // the fade follows the file index
-            else acc.Add(work);
+            acc.Add(work, i);   // by file index: the comet's fade follows the sequence, skipped frames included
             long t4 = Stopwatch.GetTimestamp();
             if (owned) { work.Dispose(); owned = false; }
 
@@ -224,14 +222,13 @@ internal sealed class StackRun
 
     /// <summary>
     /// The sky motion from the previous processed file <paramref name="prev"/> into file <paramref name="i"/> for gap filling:
-    /// the pair's cached alignment warp when trail removal estimated it (inverted when the previous file comes later), else
+    /// the pair's cached alignment warp when trail removal estimated it (frames run in file order, so prev &lt; i), else
     /// estimated from the two frames' gap-fill stars (their brightest <see cref="AlignStarsMax"/>). Null when there is none.
     /// </summary>
     SkyWarp? GapFillMotion(int prev, int i, IReadOnlyList<Star> prevStars, IReadOnlyList<Star> stars)
     {
-        if (_skyMotion.TryGetValue((Math.Min(prev, i), Math.Max(prev, i)), out var lohi))
-            return lohi is null ? null : prev < i ? lohi : lohi.Inverse();
-        return SkyAligner.EstimateWarp(Brightest(prevStars), Brightest(stars), 6 + 12 * Math.Abs(i - prev), _detScale);
+        if (_skyMotion.TryGetValue((prev, i), out var cached)) return cached;
+        return SkyAligner.EstimateWarp(Brightest(prevStars), Brightest(stars), 6 + 12 * (i - prev), _detScale);
     }
 
     static IReadOnlyList<Star> Brightest(IReadOnlyList<Star> stars) => stars.Count <= AlignStarsMax ? stars
@@ -290,10 +287,10 @@ internal sealed class StackRun
     /// mostly serial, so it overlaps well with the rest of this frame. The window keeps the frame: it is the most recently
     /// used one, and the next eviction (when the next prefetch lands) takes the least recently used.
     /// </summary>
-    void StartAlignStars(int p, FrameWindow window)
+    void StartAlignStars(int i, FrameWindow window)
     {
-        if (p + 1 >= _n) return;
-        int next = p + 1;
+        if (i + 1 >= _n) return;
+        int next = i + 1;
         foreach (int j in NeighbourWindow.Indices(next, _n, _k).Append(next))
         {
             if (_alignStars.ContainsKey(j) || _pendingAlign.ContainsKey(j) || _undecodable.Contains(j) || !window.IsCached(j)) continue;
@@ -313,12 +310,12 @@ internal sealed class StackRun
     }
 
     /// <summary>Drops the stars and pair motions that neither this frame nor the next processed one needs.</summary>
-    void ForgetSkyMotionOutside(int p, int i, int[] neighbourIdx)
+    void ForgetSkyMotionOutside(int i, int[] neighbourIdx)
     {
         var keep = new HashSet<int>(neighbourIdx) { i };
-        if (p + 1 < _n)
+        if (i + 1 < _n)
         {
-            int next = p + 1;
+            int next = i + 1;
             keep.Add(next);
             keep.UnionWith(NeighbourWindow.Indices(next, _n, _k));
         }
@@ -343,11 +340,11 @@ internal sealed class StackRun
         }
     }
 
-    /// <summary>Starts decoding the frame that the next frame (in processing order) needs and this one did not.</summary>
-    void PrefetchNext(int p, int i, int[] neighbourIdx, FrameWindow window)
+    /// <summary>Starts decoding the frame that the next file needs and this one did not.</summary>
+    void PrefetchNext(int i, int[] neighbourIdx, FrameWindow window)
     {
-        if (p + 1 >= _n) return;
-        int next = p + 1;
+        if (i + 1 >= _n) return;
+        int next = i + 1;
         var needed = _k > 0 ? NeighbourWindow.Indices(next, _n, _k).Append(next) : [next];
         foreach (int j in needed)
         {

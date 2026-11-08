@@ -35,9 +35,9 @@ public static class SettingsStore
     {
         try
         {
-            var json = File.ReadAllText(path ?? DefaultPath);
-            var loaded = JsonSerializer.Deserialize<AppSettings>(json, Options);
-            return loaded is null ? Defaults : Repair(MigrateComet(loaded, json));
+            var node = JsonNode.Parse(File.ReadAllText(path ?? DefaultPath));   // parsed once, also read by MigrateComet
+            var loaded = node.Deserialize<AppSettings>(Options);
+            return loaded is null ? Defaults : Repair(MigrateComet(loaded, node));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException
                                       or NotSupportedException or ArgumentException)
@@ -68,11 +68,12 @@ public static class SettingsStore
     {
         var d = new StackSettings();
         var st = s.Stack ?? d;
+        var (fadeIn, fadeOut) = CometFade.Normalize(st.CometFadeIn, st.CometFadeOut);
         st = st with
         {
             Mode = Enum.IsDefined(st.Mode) ? st.Mode : d.Mode,
-            CometFadeIn = CometFade.Normalize(st.CometFadeIn, st.CometFadeOut).FadeIn,
-            CometFadeOut = CometFade.Normalize(st.CometFadeIn, st.CometFadeOut).FadeOut,
+            CometFadeIn = fadeIn,
+            CometFadeOut = fadeOut,
             GapFillStrength = Unit(st.GapFillStrength, d.GapFillStrength),
             TrailSensitivity = Unit(st.TrailSensitivity, d.TrailSensitivity),
             // Non-positive values are nonsense (the default); others are clamped. K > 3 would ask the temporal median for
@@ -88,19 +89,19 @@ public static class SettingsStore
     }
 
     /// <summary>
-    /// Settings saved before the comet fade: a strength s (tail over the fraction f = 1 − 0.9·s of the sequence) and
-    /// a head at the end or the start. They become a fade over that same fraction toward the head: (f, 1), or (0, 1 − f)
-    /// with the head at the start. Files that already have a fade, or no comet settings at all, are left as they are.
+    /// Settings saved before the comet fade: a strength (a tail that decayed to 1 % over the last 10–100 % of the
+    /// sequence) and a head at the end or the start. A fade cannot reproduce a short tail that is dark before it starts,
+    /// so they become the classic comet with the same head: (1, 1), or (0, 0) with the head at the start; the strength is
+    /// dropped. Files that already have a fade, or no comet settings at all, are left as they are.
     /// </summary>
-    static AppSettings MigrateComet(AppSettings s, string json)
+    static AppSettings MigrateComet(AppSettings s, JsonNode? json)
     {
-        if (s.Stack is null || JsonNode.Parse(json)?["Stack"] is not JsonObject stack) return s;
+        if (s.Stack is null || json?["Stack"] is not JsonObject stack) return s;
         if (stack.ContainsKey(nameof(StackSettings.CometFadeIn)) || stack.ContainsKey(nameof(StackSettings.CometFadeOut))) return s;
-        double? strength = stack["CometStrength"] is JsonValue sv && sv.TryGetValue(out double v) ? v : null;
         bool headAtStart = stack["HeadAtStart"] is JsonValue hv && hv.TryGetValue(out bool h) && h;
-        if (strength is null && !headAtStart) return s;
-        double f = 1 - 0.9 * (strength is { } x && double.IsFinite(x) ? Math.Clamp(x, 0, 1) : 0.5);
-        return s with { Stack = headAtStart ? s.Stack with { CometFadeIn = 0, CometFadeOut = 1 - f } : s.Stack with { CometFadeIn = f, CometFadeOut = 1 } };
+        if (!stack.ContainsKey("CometStrength") && !headAtStart) return s;
+        double head = headAtStart ? 0 : 1;
+        return s with { Stack = s.Stack with { CometFadeIn = head, CometFadeOut = head } };
     }
 
     static double Unit(double v, double fallback) => double.IsFinite(v) ? Math.Clamp(v, 0, 1) : fallback;

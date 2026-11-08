@@ -7,8 +7,12 @@ public abstract class AccumulatorBase : IAccumulator
 {
     Size _size;
     bool _disposed;
+    int? _index;   // the index given to the Add in progress
 
     public int Count { get; private set; }
+
+    /// <summary>The position of the frame being added: its index when given, else the number of frames added so far.</summary>
+    protected int Position => _index ?? Count;
 
     public Mat Current
     {
@@ -39,6 +43,17 @@ public abstract class AccumulatorBase : IAccumulator
         }
         Count++;
     }
+
+    public void Add(Mat frame32f, int index)
+    {
+        CheckIndex(index);
+        _index = index;
+        try { Add(frame32f); }
+        finally { _index = null; }
+    }
+
+    /// <summary>Throws <see cref="ArgumentOutOfRangeException"/> for an index this accumulator cannot place.</summary>
+    protected virtual void CheckIndex(int index) => ArgumentOutOfRangeException.ThrowIfNegative(index);
 
     protected abstract void AddFirst(Mat frame);
     protected abstract void AddNext(Mat frame);

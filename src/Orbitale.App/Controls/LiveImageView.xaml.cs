@@ -58,7 +58,7 @@ public sealed partial class LiveImageView : UserControl
     LoupeDrag _drag;                         // what the pointer drags: the magnified point (on the image) or the loupe
     Point _tip, _grab;                       // the loupe's sharp corner, and where the loupe was grabbed from it (view DIPs)
     Point _at;                               // the magnified point (surface DIPs), which the loupe follows when the view moves
-    Point? _pendingTip;                      // a click that opens the loupe unless it turns out to be a double-click (view DIPs)
+    Point? _pendingAt;                       // a click that opens the loupe unless it turns out to be a double-click (surface DIPs)
     readonly DispatcherQueueTimer _loupeTimer;
     bool _left, _up;                         // the side of its sharp corner the loupe hangs on
 
@@ -226,12 +226,12 @@ public sealed partial class LiveImageView : UserControl
         if (_bitmap is null || e.Pointer.PointerDeviceType == PointerDeviceType.Touch) return;   // touch pans
         if (!e.GetCurrentPoint(Picture).Properties.IsLeftButtonPressed) return;
         if (Picture.CapturePointer(e.Pointer)) _drag = LoupeDrag.Tip;
-        var p = e.GetCurrentPoint(LoupeLayer).Position;
-        if (Loupe.Visibility == Visibility.Visible) PlaceLoupe(p, keepSide: false);
+        if (Loupe.Visibility == Visibility.Visible) PlaceLoupe(e.GetCurrentPoint(LoupeLayer).Position, keepSide: false);
         else
         {
-            // Wait out the double-click time: a double-click zooms and must not flash the loupe open and shut.
-            _pendingTip = p;
+            // Wait out the double-click time: a double-click zooms and must not flash the loupe open and shut. The point
+            // is kept on the image, so a view that moves meanwhile still opens the loupe on what was clicked.
+            _pendingAt = e.GetCurrentPoint(Surface).Position;
             _loupeTimer.Stop();
             _loupeTimer.Start();
         }
@@ -242,8 +242,9 @@ public sealed partial class LiveImageView : UserControl
     {
         if (_drag != LoupeDrag.Tip) return;
         var p = e.GetCurrentPoint(LoupeLayer).Position;
-        if (_pendingTip is { } start)
+        if (_pendingAt is { } pending)
         {
+            var start = ToView(pending);
             if (Math.Abs(p.X - start.X) < DragThreshold && Math.Abs(p.Y - start.Y) < DragThreshold) return;
             CancelPendingLoupe();   // a drag is not a double-click: open now
         }
@@ -253,24 +254,30 @@ public sealed partial class LiveImageView : UserControl
     void OpenPendingLoupe()
     {
         _loupeTimer.Stop();
-        if (_pendingTip is not { } tip) return;
-        _pendingTip = null;
-        PlaceLoupe(tip, keepSide: false);
+        if (_pendingAt is not { } at) return;
+        _pendingAt = null;
+        var tip = ToView(at);
+        if (InView(tip)) PlaceLoupe(tip, keepSide: false);   // else the clicked point has scrolled away
     }
 
     void CancelPendingLoupe()
     {
         _loupeTimer.Stop();
-        _pendingTip = null;
+        _pendingAt = null;
     }
+
+    /// <summary>A surface point (DIPs) in the loupe layer's (view) coordinates.</summary>
+    Point ToView(Point surface) => Surface.TransformToVisual(LoupeLayer).TransformPoint(surface);
+
+    bool InView(Point tip) => tip.X >= 0 && tip.Y >= 0 && tip.X <= LoupeLayer.ActualWidth && tip.Y <= LoupeLayer.ActualHeight;
 
     /// <summary>After the view moved under it (scroll, zoom, resize), puts the loupe back on its point of the image.</summary>
     void FollowImage()
     {
         if (Loupe.Visibility != Visibility.Visible || _drag != LoupeDrag.None || _bitmap is null) return;
-        var tip = Surface.TransformToVisual(LoupeLayer).TransformPoint(_at);
-        if (tip.X < 0 || tip.Y < 0 || tip.X > LoupeLayer.ActualWidth || tip.Y > LoupeLayer.ActualHeight) HideLoupe();   // scrolled out of view
-        else PlaceLoupe(tip, keepSide: false);
+        var tip = ToView(_at);
+        if (InView(tip)) PlaceLoupe(tip, keepSide: false);
+        else HideLoupe();   // scrolled out of view
     }
 
     void Picture_PointerReleased(object sender, PointerRoutedEventArgs e)
@@ -330,8 +337,8 @@ public sealed partial class LiveImageView : UserControl
 
     void Escape_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (Loupe.Visibility != Visibility.Visible) return;
-        HideLoupe();
+        if (Loupe.Visibility != Visibility.Visible && _pendingAt is null) return;
+        HideLoupe();   // also drops a loupe that is about to open
         args.Handled = true;
     }
 

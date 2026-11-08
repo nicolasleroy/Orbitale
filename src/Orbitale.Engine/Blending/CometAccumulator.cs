@@ -21,9 +21,9 @@ namespace Orbitale.Engine.Blending;
 /// <para>
 /// Each Add is one detection-scale resize and opening (buffers reused) and one fused, row-parallel full-resolution pass
 /// that also refreshes the result, so <see cref="IAccumulator.Current"/> is free. No full-size buffer is allocated per Add.
-/// The weight depends on the frame's position in the sequence: <see cref="Add(Mat, int)"/> takes the frame's file index
-/// (frames the run could not decode leave their index unused); plain <see cref="AccumulatorBase.Add"/> uses the number
-/// of frames added so far.
+/// The weight depends on the frame's position in the sequence: <see cref="IAccumulator.Add(Mat, int)"/> takes the
+/// frame's file index (frames the run could not decode leave their index unused); plain <see cref="IAccumulator.Add(Mat)"/>
+/// uses the number of frames added so far.
 /// </para>
 /// </remarks>
 public sealed class CometAccumulator : AccumulatorBase
@@ -32,7 +32,6 @@ public sealed class CometAccumulator : AccumulatorBase
 
     readonly int _total;
     readonly double _fadeIn, _fadeOut;
-    int? _index;                 // the index of the frame being added, when given
     Mat? _bg, _trail, _result, _small, _opened, _kernel;
     int[]? _x0, _x1;
     float[]? _fx, _samples;
@@ -44,14 +43,11 @@ public sealed class CometAccumulator : AccumulatorBase
         (_fadeIn, _fadeOut) = CometFade.Normalize(fadeIn, fadeOut);
     }
 
-    /// <summary>Adds the frame at <paramref name="index"/> of the sequence (0..totalFrames − 1).</summary>
-    public void Add(Mat frame32f, int index)
+    /// <summary>Frame indices run over 0..totalFrames − 1.</summary>
+    protected override void CheckIndex(int index)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(index);
+        base.CheckIndex(index);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _total);
-        _index = index;
-        try { Add(frame32f); }
-        finally { _index = null; }
     }
 
     protected override void AddFirst(Mat frame)
@@ -84,7 +80,7 @@ public sealed class CometAccumulator : AccumulatorBase
         int[] x0 = _x0!, x1 = _x1!;
         float[] fx = _fx!;
         double sy = (double)srcRows / frame.Rows;
-        float w = CometFade.Weight(_index ?? Count, _total, _fadeIn, _fadeOut);
+        float w = CometFade.Weight(Position, _total, _fadeIn, _fadeOut);
         float[] allow = NoiseAllowance(frame, opened, sy);
         Parallel.For(0, frame.Rows, r =>
         {
