@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Orbitale.Engine.Blending;
 using Orbitale.Engine.Stacking;
@@ -36,7 +37,7 @@ public static class SettingsStore
         {
             var json = File.ReadAllText(path ?? DefaultPath);
             var loaded = JsonSerializer.Deserialize<AppSettings>(json, Options);
-            return loaded is null ? Defaults : Repair(loaded);
+            return loaded is null ? Defaults : Repair(MigrateComet(loaded, json));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException
                                       or NotSupportedException or ArgumentException)
@@ -70,7 +71,8 @@ public static class SettingsStore
         st = st with
         {
             Mode = Enum.IsDefined(st.Mode) ? st.Mode : d.Mode,
-            CometStrength = Unit(st.CometStrength, d.CometStrength),
+            CometFadeIn = CometFade.Normalize(st.CometFadeIn, st.CometFadeOut).FadeIn,
+            CometFadeOut = CometFade.Normalize(st.CometFadeIn, st.CometFadeOut).FadeOut,
             GapFillStrength = Unit(st.GapFillStrength, d.GapFillStrength),
             TrailSensitivity = Unit(st.TrailSensitivity, d.TrailSensitivity),
             // Non-positive values are nonsense (the default); others are clamped. K > 3 would ask the temporal median for
@@ -83,6 +85,22 @@ public static class SettingsStore
             Stack = st,
             LastOutputFormat = string.IsNullOrWhiteSpace(s.LastOutputFormat) ? Defaults.LastOutputFormat : s.LastOutputFormat,
         };
+    }
+
+    /// <summary>
+    /// Settings saved before the comet fade: a strength s (tail over the fraction f = 1 − 0.9·s of the sequence) and
+    /// a head at the end or the start. They become a fade over that same fraction toward the head: (f, 1), or (0, 1 − f)
+    /// with the head at the start. Files that already have a fade, or no comet settings at all, are left as they are.
+    /// </summary>
+    static AppSettings MigrateComet(AppSettings s, string json)
+    {
+        if (s.Stack is null || JsonNode.Parse(json)?["Stack"] is not JsonObject stack) return s;
+        if (stack.ContainsKey(nameof(StackSettings.CometFadeIn)) || stack.ContainsKey(nameof(StackSettings.CometFadeOut))) return s;
+        double? strength = stack["CometStrength"] is JsonValue sv && sv.TryGetValue(out double v) ? v : null;
+        bool headAtStart = stack["HeadAtStart"] is JsonValue hv && hv.TryGetValue(out bool h) && h;
+        if (strength is null && !headAtStart) return s;
+        double f = 1 - 0.9 * (strength is { } x && double.IsFinite(x) ? Math.Clamp(x, 0, 1) : 0.5);
+        return s with { Stack = headAtStart ? s.Stack with { CometFadeIn = 0, CometFadeOut = 1 - f } : s.Stack with { CometFadeIn = f, CometFadeOut = 1 } };
     }
 
     static double Unit(double v, double fallback) => double.IsFinite(v) ? Math.Clamp(v, 0, 1) : fallback;

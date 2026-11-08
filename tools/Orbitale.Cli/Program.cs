@@ -8,7 +8,7 @@ using Orbitale.Engine.Stacking;
 
 // Console harness: runs the stacking engine on a folder of frames and reports speed and memory.
 const string Usage =
-    "Orbitale.Cli <inputDir> <output.tif|.jpg> [--mode lighten|darken|average] [--comet 0..1] [--head-at-start] " +
+    "Orbitale.Cli <inputDir> <output.tif|.jpg> [--mode lighten|darken|average] [--comet IN:OUT] " +
     "[--gapfill 0..1] [--no-trails] [--sensitivity 0..1] [--limit N] [--segments out.csv]";
 const int PreviewLongSide = 2560;
 
@@ -26,8 +26,16 @@ try
         switch (args[a])
         {
             case "--mode": settings = settings with { Mode = Enum.Parse<BlendMode>(Next(), ignoreCase: true) }; break;
-            case "--comet": settings = settings with { Comet = true, CometStrength = Unit() }; break;
-            case "--head-at-start": settings = settings with { HeadAtStart = true }; break;
+            case "--comet":
+            {
+                var parts = Next().Split(':');
+                double Part(string v) => double.Parse(v, CultureInfo.InvariantCulture) is var x and >= 0 and <= 1 ? x : throw new ArgumentException("--comet bounds must be in 0..1");
+                if (parts.Length != 2) throw new ArgumentException("--comet needs IN:OUT, for example 0.5:1");
+                double fadeIn = Part(parts[0]), fadeOut = Part(parts[1]);
+                if (fadeIn > fadeOut) throw new ArgumentException("--comet fade-in end must not be after the fade-out start");
+                settings = settings with { Comet = true, CometFadeIn = fadeIn, CometFadeOut = fadeOut };
+                break;
+            }
             case "--gapfill": settings = settings with { GapFill = true, GapFillStrength = Unit() }; break;
             case "--no-trails": settings = settings with { RemoveTrails = false }; break;
             case "--sensitivity": settings = settings with { TrailSensitivity = Unit() }; break;

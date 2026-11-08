@@ -183,24 +183,12 @@ public sealed class StackSettingsMapperTests
     [InlineData(BlendMode.Average)]
     public void Comet_and_gap_filling_are_turned_off_outside_lighten(BlendMode mode)
     {
-        var s = StackSettingsMapper.ForRun(new StackSettings(mode, Comet: true, GapFill: true, CometStrength: 0.3, HeadAtStart: true));
+        var s = StackSettingsMapper.ForRun(new StackSettings(mode, Comet: true, GapFill: true, CometFadeIn: 0.3, CometFadeOut: 0.6));
 
         Assert.False(s.Comet);
         Assert.False(s.GapFill);
         Assert.Equal(mode, s.Mode);
-        Assert.Equal(0.3, s.CometStrength);   // strengths are remembered
-        Assert.False(s.HeadAtStart);          // no comet, so no head to place
-    }
-
-    [Theory]
-    [InlineData(BlendMode.Lighten)]
-    [InlineData(BlendMode.Darken)]
-    public void Head_at_start_is_off_when_the_comet_is_off(BlendMode mode)
-    {
-        // HeadAtStart only places the comet head: without a comet the run keeps file order.
-        var s = StackSettingsMapper.ForRun(new StackSettings(mode, Comet: false, HeadAtStart: true));
-        Assert.False(s.HeadAtStart);
-        Assert.True(StackSettingsMapper.ForRun(new StackSettings(BlendMode.Lighten, Comet: true, HeadAtStart: true)).HeadAtStart);
+        Assert.Equal((0.3, 0.6), (s.CometFadeIn, s.CometFadeOut));   // fades are remembered
     }
 
     [Fact]
@@ -215,9 +203,9 @@ public sealed class StackSettingsMapperTests
     public void Percent_sliders_map_to_fractions()
     {
         var s = StackSettingsMapper.FromPercent(new StackSettings(NeighbourK: 3), BlendMode.Lighten,
-            comet: true, cometStrength: 50, headAtStart: false, gapFill: true, gapFillStrength: 25, removeTrails: true, trailSensitivity: 60);
+            comet: true, cometFadeIn: 20, cometFadeOut: 80, gapFill: true, gapFillStrength: 25, removeTrails: true, trailSensitivity: 60);
 
-        Assert.Equal(new StackSettings(BlendMode.Lighten, true, 0.5, false, true, 0.25, true, 0.6, NeighbourK: 3), s);
+        Assert.Equal(new StackSettings(BlendMode.Lighten, true, 0.2, 0.8, true, 0.25, true, 0.6, NeighbourK: 3), s);
     }
 }
 

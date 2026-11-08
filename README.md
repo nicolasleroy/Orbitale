@@ -17,7 +17,7 @@ Orbitale is a Windows 11 app that stacks a night-sky frame sequence into a star-
 
 - **Trail removal.** For each frame, the sky of its neighbouring frames is rotated into place, with lens distortion corrected. Anything new and line-shaped (a plane or satellite) is repaired with the real sky from those neighbours. This sky alignment only serves to find and repair trails: the stack itself is not aligned (a fixed tripod is assumed), so the stars still draw their trails.
 - **Blend modes.** Lighten, Darken or Average.
-- **Comet style.** A strength setting, and the head of the comet can be at the start or at the end of the trails.
+- **Comet style.** A two-handle slider sets how the trails fade in and fade out along the sequence: the trails grow from nothing up to the left handle, stay at full brightness between the handles, and fade away after the right handle. Both handles at the right end give the classic comet with its head at the end; both at the left end put the head at the start.
 - **Gap filling.** A strength setting.
 - **Frame list.** Frames can be removed from the list before a run.
 - **Remembered settings and folders.** Your settings are kept between sessions. The frame pickers open in the folder you last added frames from, and the save dialog in the folder you last saved to.
@@ -61,8 +61,7 @@ dotnet run --project tools/Orbitale.Cli -c Release -- <inputDir> <output.tif|.jp
 | Option | Meaning |
 | --- | --- |
 | `--mode lighten\|darken\|average` | Blend mode |
-| `--comet 0..1` | Turn on the comet style with this strength |
-| `--head-at-start` | Put the comet head at the start of the trails |
+| `--comet IN:OUT` | Turn on the comet style: the trails fade in up to IN and fade out from OUT (fractions of the sequence, 0..1, for example `0.5:1`) |
 | `--gapfill 0..1` | Turn on gap filling with this strength |
 | `--no-trails` | Turn trail removal off |
 | `--sensitivity 0..1` | Trail removal sensitivity |

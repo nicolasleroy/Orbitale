@@ -144,13 +144,13 @@ public sealed class NoticeLog
 /// <summary>The toolbar's settings (sliders in percent) as engine settings.</summary>
 public static class StackSettingsMapper
 {
-    public static StackSettings FromPercent(StackSettings baseline, BlendMode mode, bool comet, double cometStrength, bool headAtStart,
+    public static StackSettings FromPercent(StackSettings baseline, BlendMode mode, bool comet, double cometFadeIn, double cometFadeOut,
         bool gapFill, double gapFillStrength, bool removeTrails, double trailSensitivity) => baseline with
     {
         Mode = mode,
         Comet = comet,
-        CometStrength = cometStrength / 100,
-        HeadAtStart = headAtStart,
+        CometFadeIn = cometFadeIn / 100,
+        CometFadeOut = cometFadeOut / 100,
         GapFill = gapFill,
         GapFillStrength = gapFillStrength / 100,
         RemoveTrails = removeTrails,
@@ -158,14 +158,10 @@ public static class StackSettingsMapper
     };
 
     /// <summary>
-    /// The settings a run uses: comet and gap filling only exist in Lighten (the strengths are kept), and HeadAtStart only
-    /// places the comet head, so without a comet the run keeps file order.
+    /// The settings a run uses: comet and gap filling only exist in Lighten (their strengths and fades are kept).
     /// </summary>
-    public static StackSettings ForRun(StackSettings s)
-    {
-        var run = s.Mode == BlendMode.Lighten ? s : s with { Comet = false, GapFill = false };
-        return run.Comet ? run : run with { HeadAtStart = false };
-    }
+    public static StackSettings ForRun(StackSettings s) =>
+        s.Mode == BlendMode.Lighten ? s : s with { Comet = false, GapFill = false };
 }
 
 /// <summary>

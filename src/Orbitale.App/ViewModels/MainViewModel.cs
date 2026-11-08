@@ -69,8 +69,8 @@ public partial class MainViewModel : ObservableObject
         _loadedStack = s;
         ModeIndex = (int)s.Mode;
         Comet = s.Comet;
-        CometStrength = s.CometStrength * 100;
-        HeadAtStart = s.HeadAtStart;
+        CometFadeIn = s.CometFadeIn * 100;
+        CometFadeOut = s.CometFadeOut * 100;
         GapFill = s.GapFill;
         GapFillStrength = s.GapFillStrength * 100;
         RemoveTrails = s.RemoveTrails;
@@ -91,12 +91,13 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool Comet { get; set; }
 
-    /// <summary>0–100 %.</summary>
+    /// <summary>Where the comet's fade-in ends, 0–100 % of the sequence (≤ <see cref="CometFadeOut"/>).</summary>
     [ObservableProperty]
-    public partial double CometStrength { get; set; }
+    public partial double CometFadeIn { get; set; }
 
+    /// <summary>Where the comet's fade-out starts, 0–100 % of the sequence (≥ <see cref="CometFadeIn"/>).</summary>
     [ObservableProperty]
-    public partial bool HeadAtStart { get; set; }
+    public partial double CometFadeOut { get; set; }
 
     [ObservableProperty]
     public partial bool GapFill { get; set; }
@@ -480,7 +481,7 @@ public partial class MainViewModel : ObservableObject
     /// <summary>The settings as the toolbar shows them (remembered as is, so switching modes loses nothing).</summary>
     public AppSettings ToAppSettings() => new(ToolbarSettings(), LastInputFolder, LastOutputFolder, LastOutputFormat);
 
-    StackSettings ToolbarSettings() => StackSettingsMapper.FromPercent(_loadedStack, Mode, Comet, CometStrength, HeadAtStart,
+    StackSettings ToolbarSettings() => StackSettingsMapper.FromPercent(_loadedStack, Mode, Comet, CometFadeIn, CometFadeOut,
         GapFill, GapFillStrength, RemoveTrails, TrailSensitivity);
 
     // ---- Internals ----

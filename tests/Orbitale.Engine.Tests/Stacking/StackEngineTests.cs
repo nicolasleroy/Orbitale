@@ -165,31 +165,12 @@ public class StackEngineTests(ITestOutputHelper output)
         Assert.All(reports, p => Assert.Null(p.Notice));
     }
 
-    [Fact] public async Task HeadAtStartProcessesInReverse()
+    [Fact] public async Task FramesAreProcessedInFileOrder()
     {
         var seq = FrameSequence.Build(SyntheticFiles(8)); var reports = new List<StackProgress>();
-        using var r = await new StackEngine().RunAsync(seq, new StackSettings(HeadAtStart: true), new SyncProgress<StackProgress>(reports.Add), default);
-        Assert.Equal(Enumerable.Range(0, 8).Reverse(), reports.Select(p => p.FileIndex));
+        using var r = await new StackEngine().RunAsync(seq, new StackSettings(Comet: true, CometFadeIn: 0, CometFadeOut: 0), new SyncProgress<StackProgress>(reports.Add), default);
+        Assert.Equal(Enumerable.Range(0, 8), reports.Select(p => p.FileIndex));
         Assert.Equal(Enumerable.Range(1, 8), reports.Select(p => p.Processed));
-    }
-
-    [Fact] public async Task ReverseOrderUsesTheSameNeighboursByFileIndex()
-    {
-        // Lighten is order-independent, and the neighbours of each frame are chosen by file index, so the cleaned frames
-        // and hence the stacks are identical whichever end the run starts from.
-        var files = SyntheticFiles(6);
-        var dir = Path.GetDirectoryName(files[0])!;
-        using (var m = ImageReader.Read(files[2]))
-        {
-            SyntheticSky.DrawStreak(m, new Point(10, 30), new Point(310, 120), 0.8, dashed: false);
-            ImageWriter.Save(m, files[2], new ImageMetadata());
-        }
-        var seq = FrameSequence.Build(files);
-        var forwardReports = new List<StackProgress>();
-        using var forward = await new StackEngine().RunAsync(seq, new StackSettings(), new SyncProgress<StackProgress>(forwardReports.Add), default);
-        using var reverse = await new StackEngine().RunAsync(seq, new StackSettings(HeadAtStart: true), new SyncProgress<StackProgress>(_ => { }), default);
-        Assert.True(forwardReports.Single(p => p.FileIndex == 2).TrailsInFrame >= 1, "the streak must be detected");
-        Assert.Equal(0, Cv2.Norm(forward.Image, reverse.Image, NormTypes.INF));
     }
 
     [Fact] public async Task TrailsAreCountedAndMappedToPreviewCoordinates()
@@ -255,7 +236,7 @@ public class StackEngineTests(ITestOutputHelper output)
     [Fact] public async Task CometAndGapFillRunWithTrailRemoval()
     {
         var seq = FrameSequence.Build(SyntheticFiles(6)); var reports = new List<StackProgress>();
-        var s = new StackSettings(Comet: true, CometStrength: 0.8, GapFill: true, GapFillStrength: 0.5);
+        var s = new StackSettings(Comet: true, CometFadeIn: 0.2, CometFadeOut: 0.8, GapFill: true, GapFillStrength: 0.5);
         using var r = await new StackEngine().RunAsync(seq, s, new SyncProgress<StackProgress>(reports.Add), default);
         Assert.True(r.Completed);
         Assert.Equal(6, reports.Count);
@@ -263,26 +244,20 @@ public class StackEngineTests(ITestOutputHelper output)
 
     [Theory]
     [InlineData(true)] [InlineData(false)]
-    public async Task GapFillFollowsTheSkyMotionInBothDirections(bool removeTrails)
+    public async Task GapFillFollowsTheSkyMotion(bool removeTrails)
     {
         // Dotted trails (shutter open a quarter of each interval). The gap filler gets the sky motion from the previous
-        // processed frame to the current one (the alignment's pair warp with trail removal, its own estimate without), so
-        // it bridges the same gaps whichever end the run starts from. A motion model in the wrong direction would drop them.
+        // processed frame to the current one (the alignment's pair warp with trail removal, its own estimate without).
         using var sky = SyntheticSky.Generate(8, 900, 600, 250, 0.6, seed: 11, landscape: false, exposure: 0.25);
         var seq = FrameSequence.Build(SyntheticFiles(sky.TakeFrames(), extension: ".tif"));   // 16 bit: JPG blocks would detect as stars
-        async Task<StackResult> Run(bool gapFill, bool headAtStart) => await new StackEngine().RunAsync(seq,
-            new StackSettings(RemoveTrails: removeTrails, GapFill: gapFill, GapFillStrength: 0.6, HeadAtStart: headAtStart),
+        async Task<StackResult> Run(bool gapFill) => await new StackEngine().RunAsync(seq,
+            new StackSettings(RemoveTrails: removeTrails, GapFill: gapFill, GapFillStrength: 0.6),
             new SyncProgress<StackProgress>(_ => { }), default);
-        using var forward = await Run(true, false);
-        using var reverse = await Run(true, true);
-        using var plain = await Run(false, false);
-        // Light the gap filling added, and how much of it differs between the directions (the matcher's local-motion
-        // cells are keyed by the previous frame's positions, so a few borderline pairs may differ).
-        double added = Cv2.Norm(forward.Image, plain.Image, NormTypes.L1), addedReverse = Cv2.Norm(reverse.Image, plain.Image, NormTypes.L1);
-        double differs = Cv2.Norm(forward.Image, reverse.Image, NormTypes.L1);
-        output.WriteLine($"gap-fill light forward {added:F1}, reverse {addedReverse:F1}, forward vs reverse {differs:F1}");
-        Assert.True(added > 100, $"forward run filled almost nothing ({added:F1})");
-        Assert.True(differs < 0.05 * added, $"the reverse run filled different gaps ({differs:F1} of {added:F1})");
+        using var filled = await Run(true);
+        using var plain = await Run(false);
+        double added = Cv2.Norm(filled.Image, plain.Image, NormTypes.L1);
+        output.WriteLine($"gap-fill light {added:F1}");
+        Assert.True(added > 100, $"the run filled almost nothing ({added:F1})");
     }
 
     [Fact] public async Task NonLightenModesIgnoreCometAndGapFill()

@@ -21,8 +21,8 @@ public sealed class SettingsStoreTests : IDisposable
         var stack = new StackSettings(
             Mode: BlendMode.Darken,
             Comet: true,
-            CometStrength: 0.25,
-            HeadAtStart: true,
+            CometFadeIn: 0.25,
+            CometFadeOut: 0.7,
             GapFill: true,
             GapFillStrength: 0.75,
             RemoveTrails: false,
@@ -83,19 +83,37 @@ public sealed class SettingsStoreTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
         File.WriteAllText(FilePath,
-            "{\"Stack\": {\"Mode\": 7, \"CometStrength\": 4.2, \"GapFillStrength\": -1, \"TrailSensitivity\": 0.3, " +
+            "{\"Stack\": {\"Mode\": 7, \"CometFadeIn\": 4.2, \"CometFadeOut\": -1, \"GapFillStrength\": -1, \"TrailSensitivity\": 0.3, " +
             "\"NeighbourK\": 0, \"PreviewMaxLongSide\": -5}, \"LastOutputFormat\": null}");
 
         var loaded = SettingsStore.Load(FilePath);
 
         var defaults = new StackSettings();
         Assert.Equal(defaults.Mode, loaded.Stack.Mode);
-        Assert.Equal(1.0, loaded.Stack.CometStrength);
+        Assert.Equal(0.0, loaded.Stack.CometFadeIn);    // clamped to (1, 0), then put in order
+        Assert.Equal(1.0, loaded.Stack.CometFadeOut);
         Assert.Equal(0.0, loaded.Stack.GapFillStrength);
         Assert.Equal(0.3, loaded.Stack.TrailSensitivity);
         Assert.Equal(defaults.NeighbourK, loaded.Stack.NeighbourK);
         Assert.Equal(defaults.PreviewMaxLongSide, loaded.Stack.PreviewMaxLongSide);
         Assert.Equal("tif", loaded.LastOutputFormat);
+    }
+
+    [Theory]
+    [InlineData("\"CometStrength\": 0.5", 0.55, 1.0)]                        // tail over 55 % of the sequence, head at the end
+    [InlineData("\"CometStrength\": 1, \"HeadAtStart\": true", 0.0, 0.9)]   // tail over 10 %, head at the start
+    [InlineData("\"HeadAtStart\": true", 0.0, 0.45)]                         // the old default strength
+    [InlineData("\"CometStrength\": 0.5, \"CometFadeIn\": 0.2", 0.2, 1.0)] // already has a fade: kept
+    public void Settings_from_before_the_fade_are_migrated(string stack, double fadeIn, double fadeOut)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        File.WriteAllText(FilePath, $"{{\"Stack\": {{\"Comet\": true, {stack}}}}}");
+
+        var loaded = SettingsStore.Load(FilePath);
+
+        Assert.True(loaded.Stack.Comet);
+        Assert.Equal(fadeIn, loaded.Stack.CometFadeIn, 6);
+        Assert.Equal(fadeOut, loaded.Stack.CometFadeOut, 6);
     }
 
     [Theory]

@@ -11,16 +11,16 @@ public class AccumulatorTests(ITestOutputHelper output)
 
     static float Run(BlendMode mode, params Mat[] frames)
     {
-        using var acc = AccumulatorFactory.Create(mode, false, 0, frames.Length);
+        using var acc = AccumulatorFactory.Create(mode, false, 0, 1, frames.Length);
         foreach (var f in frames) acc.Add(f);
         return acc.Current.At<Vec3f>(2, 3).Item1;
     }
 
     /// <summary>One bright pixel moving 1 px/frame along row 10 over a flat 0.1 background; returns the result and the peak excess.</summary>
-    static (Mat result, float peak) RunMovingStar(int n, double strength)
+    static (Mat result, float peak) RunMovingStar(int n, double fadeIn, double fadeOut)
     {
         const float bg = 0.1f, star = 0.9f;
-        using var acc = AccumulatorFactory.Create(BlendMode.Lighten, true, strength, n);
+        using var acc = AccumulatorFactory.Create(BlendMode.Lighten, true, fadeIn, fadeOut, n);
         for (int i = 0; i < n; i++)
         {
             using var f = new Mat(20, n + 40, MatType.CV_32FC3, Scalar.All(bg));
@@ -47,18 +47,18 @@ public class AccumulatorTests(ITestOutputHelper output)
       Assert.Equal(3, acc.Count); }
 
     [Fact] public void FactoryIgnoresCometForNonLighten()
-    { using var d = AccumulatorFactory.Create(BlendMode.Darken, true, 1.0, 10);
-      using var a = AccumulatorFactory.Create(BlendMode.Average, true, 1.0, 10);
+    { using var d = AccumulatorFactory.Create(BlendMode.Darken, true, 1.0, 1.0, 10);
+      using var a = AccumulatorFactory.Create(BlendMode.Average, true, 1.0, 1.0, 10);
       Assert.IsType<DarkenAccumulator>(d);
       Assert.IsType<AverageAccumulator>(a);
-      Assert.IsType<CometAccumulator>(AccumulatorFactory.Create(BlendMode.Lighten, true, 0.5, 10));
-      Assert.IsType<LightenAccumulator>(AccumulatorFactory.Create(BlendMode.Lighten, false, 0.5, 10)); }
+      Assert.IsType<CometAccumulator>(AccumulatorFactory.Create(BlendMode.Lighten, true, 0.5, 1, 10));
+      Assert.IsType<LightenAccumulator>(AccumulatorFactory.Create(BlendMode.Lighten, false, 0.5, 1, 10)); }
 
     [Theory]
     [InlineData(BlendMode.Lighten, false)] [InlineData(BlendMode.Lighten, true)]
     [InlineData(BlendMode.Darken, false)] [InlineData(BlendMode.Average, false)]
     public void ValidatesFramesAndState(BlendMode mode, bool comet)
-    { using var acc = AccumulatorFactory.Create(mode, comet, 0.5, 5);
+    { using var acc = AccumulatorFactory.Create(mode, comet, 0.5, 1, 5);
       Assert.Throws<InvalidOperationException>(() => acc.Current);
       using var first = Const(0.2f);
       acc.Add(first);
@@ -76,8 +76,8 @@ public class AccumulatorTests(ITestOutputHelper output)
 
     [Fact] public void CometNeverChangesStaticLandscape()   // spec anti-goal; noise-free so the landscape is truly static
     { var frames = SyntheticSky.Make(40, 400, 300, 150, 0.4, seed: 3, noise: 0);
-      using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 1.0, 40);
-      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 40);
+      using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 0.3, 0.6, 40);
+      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 1, 40);
       foreach (var f in frames) { comet.Add(f); light.Add(f); }
       var land = new Rect(0, 246, 400, 54);   // bottom 18 %: safely inside the static band
       Assert.True(Cv2.Norm(comet.Current[land], light.Current[land], NormTypes.INF) < 1e-4);
@@ -95,8 +95,8 @@ public class AccumulatorTests(ITestOutputHelper output)
         using var lit = new Mat(); Cv2.Compare(g, Scalar.All(0.05 + 0.002), lit, CmpTypes.GT);
         Cv2.BitwiseOr(trails, lit, trails); }
       using (var k = Cv2.GetStructuringElement(MorphShapes.Ellipse, new Size(5, 5))) Cv2.Dilate(trails, trails, k);
-      using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 0.5, 40);
-      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 40);
+      using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 1, 1, 40);
+      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 1, 40);
       foreach (var f in sky.Frames) { comet.Add(f); light.Add(f); }
 
       var land = new Rect(0, 246, 400, 54);                    // bottom 18 %: safely inside the static band
@@ -117,23 +117,70 @@ public class AccumulatorTests(ITestOutputHelper output)
       output.WriteLine($"trail light above the sky: comet {ct:F5} lighten {lt:F5} ({ct / lt:P0})");
       Assert.True(ct < 0.7 * lt, $"trails do not fade: comet {ct:F5} vs lighten {lt:F5}"); }
 
-    [Fact] public void CometTailFadesOlderPositions()
-    { // one star moving 1 px/frame along x for 50 frames, strength 0.5 (T = 28, d = 0.01^(1/28))
-      var (r, peak) = RunMovingStar(50, 0.5);
+    [Fact] public void CometFadeInRampsUpToTheHead()
+    { // fade-in over the whole sequence (head at the end): position k keeps k/(n-1) of the star light
+      const int n = 41;
+      var (r, peak) = RunMovingStar(n, 1, 1);
       using var _ = r;
-      int head = 20 + 49;
-      Assert.Equal(peak, Excess(r, head), 4);                    // newest position = star value
-      Assert.True(Excess(r, head - 40) < 0.05f * peak);          // 40 frames back: < 5 %
-      // The background is star-free, so position 0 (frame 0) carries a tail too; the monotonic check starts at position 1.
-      for (int x = 21; x < head; x++)
-          Assert.True(Excess(r, x) < Excess(r, x + 1), $"tail not increasing toward head at x={x}"); }
+      Assert.Equal(peak, Excess(r, 20 + n - 1), 4);                    // newest position = star value
+      Assert.Equal(0, Excess(r, 20), 4);                               // first position: invisible
+      Assert.Equal(0.5f * peak, Excess(r, 20 + 20), 3);                // half way: half
+      for (int x = 20; x < 20 + n - 1; x++)
+          Assert.True(Excess(r, x) < Excess(r, x + 1), $"trail not increasing toward head at x={x}"); }
 
-    [Fact] public void CometStrengthControlsTailLength()
-    { // N = 20; "back" is measured to position 1 (18 frames back), as when frame 0 did not carry a tail.
-      var (weak, peak) = RunMovingStar(20, 0.0);                 // T = 20, d ~ 0.794
-      using var _w = weak;
-      Assert.True(Excess(weak, 20 + 19 - 18) >= 0.01f * peak);
-      var (strong, peak2) = RunMovingStar(20, 1.0);              // T = 2, d = 0.1
-      using var _s = strong;
-      Assert.True(Excess(strong, 20 + 19 - 5) < 0.01f * peak2); }
+    [Fact] public void CometFadeOutMirrorsTheFadeIn()
+    { // both handles at the start: the head is at the start and the trail fades out toward the end
+      const int n = 41;
+      var (r, peak) = RunMovingStar(n, 0, 0);
+      using var _ = r;
+      Assert.Equal(peak, Excess(r, 20), 4);
+      Assert.Equal(0, Excess(r, 20 + n - 1), 4);
+      for (int x = 20; x < 20 + n - 1; x++)
+          Assert.True(Excess(r, x) > Excess(r, x + 1), $"trail not decreasing away from head at x={x}"); }
+
+    [Fact] public void CometKeepsFullBrightnessBetweenTheHandles()
+    { const int n = 51;                                                // t = k / 50
+      var (r, peak) = RunMovingStar(n, 0.2, 0.6);
+      using var _ = r;
+      Assert.Equal(0.5f * peak, Excess(r, 20 + 5), 3);                 // t = 0.1: half way up the fade-in
+      for (int k = 10; k <= 30; k++) Assert.Equal(peak, Excess(r, 20 + k), 4);
+      Assert.Equal(0.5f * peak, Excess(r, 20 + 40), 3);                // t = 0.8: half way down the fade-out
+      Assert.Equal(0, Excess(r, 20 + 50), 4); }
+
+    [Fact] public void CometWithoutFadeIsLighten()
+    { var frames = SyntheticSky.Make(12, 200, 150, 75, 0.4, seed: 5);
+      using var comet = AccumulatorFactory.Create(BlendMode.Lighten, true, 0, 1, 12);
+      using var light = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 1, 12);
+      foreach (var f in frames) { comet.Add(f); light.Add(f); }
+      Assert.True(Cv2.Norm(comet.Current, light.Current, NormTypes.INF) < 1e-6);
+      foreach (var f in frames) f.Dispose(); }
+
+    [Fact] public void CometWeightFollowsTheFileIndex()
+    { // a skipped (undecodable) frame leaves its index unused: the frames after it keep their own weight
+      var frames = SyntheticSky.Make(10, 200, 150, 75, 0.4, seed: 7);
+      using var counted = new CometAccumulator(10, 0.3, 0.8);
+      using var indexed = new CometAccumulator(10, 0.3, 0.8);
+      using var skipping = new CometAccumulator(10, 0.3, 0.8);
+      for (int i = 0; i < 10; i++) { counted.Add(frames[i]); indexed.Add(frames[i], i); }
+      Assert.Equal(0, Cv2.Norm(counted.Current, indexed.Current, NormTypes.INF));
+      for (int i = 0; i < 10; i++) if (i != 4) skipping.Add(frames[i], i);
+      using var plainSkip = new CometAccumulator(10, 0.3, 0.8);
+      for (int i = 0; i < 10; i++) if (i != 4) plainSkip.Add(frames[i]);
+      Assert.True(Cv2.Norm(skipping.Current, plainSkip.Current, NormTypes.INF) > 1e-3, "the index must set the weight");
+      Assert.Throws<ArgumentOutOfRangeException>(() => indexed.Add(frames[0], 10));
+      Assert.Throws<ArgumentOutOfRangeException>(() => indexed.Add(frames[0], -1));
+      foreach (var f in frames) f.Dispose(); }
+
+    [Theory]
+    [InlineData(0, 11, 0.5, 1.0, 0.0)]
+    [InlineData(5, 11, 0.5, 1.0, 1.0)]
+    [InlineData(10, 11, 0.5, 1.0, 1.0)]
+    [InlineData(10, 11, 1.0, 1.0, 1.0)]
+    [InlineData(0, 11, 0.0, 0.0, 1.0)]
+    [InlineData(10, 11, 0.0, 0.0, 0.0)]
+    [InlineData(8, 11, 0.2, 0.6, 0.5)]
+    [InlineData(0, 1, 0.5, 0.5, 1.0)]     // a single frame sits at the end
+    [InlineData(2, 11, 0.8, 0.4, 0.5)]    // swapped bounds are reordered to (0.4, 0.8): t = 0.2 is half way up
+    public void CometFadeWeights(int index, int total, double fadeIn, double fadeOut, double expected)
+    { Assert.Equal(expected, CometFade.Weight(index, total, fadeIn, fadeOut), 5); }
 }

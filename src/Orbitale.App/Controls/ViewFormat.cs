@@ -40,4 +40,9 @@ public static class ViewFormat
     public static InfoBarSeverity MessageSeverity(bool isError) => isError ? InfoBarSeverity.Error : InfoBarSeverity.Success;
 
     public static string Percent(string label, double value) => $"{label}: {Math.Round(value)} %";
+
+    /// <summary>The comet range's caption, e.g. "Fade in to 50 % · fade out from 100 %".</summary>
+    public static string CometFade(double fadeIn, double fadeOut) =>
+        (fadeIn <= 0 ? "No fade in" : $"Fade in to {Math.Round(fadeIn)} %") + " · " +
+        (fadeOut >= 100 ? "no fade out" : $"fade out from {Math.Round(fadeOut)} %");
 }

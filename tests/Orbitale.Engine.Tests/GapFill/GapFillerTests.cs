@@ -261,7 +261,7 @@ public class GapFillerTests(ITestOutputHelper output)
     /// <summary>Lighten stack of <paramref name="frames"/>, gap-filled with <paramref name="filler"/>; with <paramref name="motion"/>, the sky's true motion is the gap filler's motion model.</summary>
     static Mat Stack(IReadOnlyList<Mat> frames, GapFiller? filler, Sky? motion = null)
     {
-        using var acc = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, frames.Count);
+        using var acc = AccumulatorFactory.Create(BlendMode.Lighten, false, 0, 1, frames.Count);
         IReadOnlyList<Star>? prev = null;
         for (int i = 0; i < frames.Count; i++)
         {

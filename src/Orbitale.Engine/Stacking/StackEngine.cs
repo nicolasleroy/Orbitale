@@ -6,9 +6,8 @@ namespace Orbitale.Engine.Stacking;
 internal sealed record FrameTimings(int FileIndex, double DecodeMs, double AlignMs, double CleanMs, double GapFillMs, double AccumulateMs, double PreviewMs);
 
 /// <summary>
-/// Stacks a frame sequence: for each frame, in file order (reversed with <see cref="StackSettings.HeadAtStart"/>),
-/// decode, remove trails against its neighbours by file index, gap-fill against the previously processed frame, blend,
-/// and report progress with a preview of the running result.
+/// Stacks a frame sequence: for each frame, in file order, decode, remove trails against its neighbours by file index,
+/// gap-fill against the previously processed frame, blend, and report progress with a preview of the running result.
 /// </summary>
 public sealed class StackEngine
 {

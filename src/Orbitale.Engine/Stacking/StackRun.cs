@@ -23,7 +23,6 @@ internal sealed class StackRun
     readonly Action<FrameTimings>? _timings;
 
     readonly int _n;
-    readonly int[] _order;
     readonly int _k;                 // effective neighbour half-window; 0 = no trail removal
     readonly TrailSettings _trailSettings;
     readonly GapFiller? _gapFiller;
@@ -49,8 +48,6 @@ internal sealed class StackRun
     {
         _seq = seq; _s = s; _progress = progress; _ct = ct; _timings = timings;
         _n = seq.Files.Count;
-        _order = Enumerable.Range(0, _n).ToArray();
-        if (s.HeadAtStart) Array.Reverse(_order);
 
         bool lighten = s.Mode == BlendMode.Lighten;
         _gapFiller = lighten && s.GapFill ? new GapFiller(s.GapFillStrength) : null;
@@ -67,7 +64,7 @@ internal sealed class StackRun
         var metadata = ReadMetadata();
         var clock = Stopwatch.StartNew();
         var window = new FrameWindow(_seq.Files, 2 * _k + 2);
-        var acc = AccumulatorFactory.Create(_s.Mode, _s.Mode == BlendMode.Lighten && _s.Comet, _s.CometStrength, _n);
+        var acc = AccumulatorFactory.Create(_s.Mode, _s.Mode == BlendMode.Lighten && _s.Comet, _s.CometFadeIn, _s.CometFadeOut, _n);
         bool completed = false;
         try
         {
@@ -130,7 +127,7 @@ internal sealed class StackRun
     /// <summary>Processes the frame at position <paramref name="p"/> of the run. Returns false when cancelled mid-frame.</summary>
     bool ProcessFrame(int p, FrameWindow window, IAccumulator acc, Stopwatch clock)
     {
-        int i = _order[p];
+        int i = p;   // frames are processed in file order
         long t0 = Stopwatch.GetTimestamp();
 
         // 1. Decode the frame and its neighbours (by file index), then start decoding what the next frame adds.
@@ -197,7 +194,8 @@ internal sealed class StackRun
             if (_ct.IsCancellationRequested) return false;
 
             // 4. Blend.
-            acc.Add(work);
+            if (acc is CometAccumulator comet) comet.Add(work, i);   // the fade follows the file index
+            else acc.Add(work);
             long t4 = Stopwatch.GetTimestamp();
             if (owned) { work.Dispose(); owned = false; }
 
@@ -226,7 +224,7 @@ internal sealed class StackRun
 
     /// <summary>
     /// The sky motion from the previous processed file <paramref name="prev"/> into file <paramref name="i"/> for gap filling:
-    /// the pair's cached alignment warp when trail removal estimated it (inverted under HeadAtStart, as everywhere), else
+    /// the pair's cached alignment warp when trail removal estimated it (inverted when the previous file comes later), else
     /// estimated from the two frames' gap-fill stars (their brightest <see cref="AlignStarsMax"/>). Null when there is none.
     /// </summary>
     SkyWarp? GapFillMotion(int prev, int i, IReadOnlyList<Star> prevStars, IReadOnlyList<Star> stars)
@@ -295,7 +293,7 @@ internal sealed class StackRun
     void StartAlignStars(int p, FrameWindow window)
     {
         if (p + 1 >= _n) return;
-        int next = _order[p + 1];
+        int next = p + 1;
         foreach (int j in NeighbourWindow.Indices(next, _n, _k).Append(next))
         {
             if (_alignStars.ContainsKey(j) || _pendingAlign.ContainsKey(j) || _undecodable.Contains(j) || !window.IsCached(j)) continue;
@@ -320,7 +318,7 @@ internal sealed class StackRun
         var keep = new HashSet<int>(neighbourIdx) { i };
         if (p + 1 < _n)
         {
-            int next = _order[p + 1];
+            int next = p + 1;
             keep.Add(next);
             keep.UnionWith(NeighbourWindow.Indices(next, _n, _k));
         }
@@ -349,7 +347,7 @@ internal sealed class StackRun
     void PrefetchNext(int p, int i, int[] neighbourIdx, FrameWindow window)
     {
         if (p + 1 >= _n) return;
-        int next = _order[p + 1];
+        int next = p + 1;
         var needed = _k > 0 ? NeighbourWindow.Indices(next, _n, _k).Append(next) : [next];
         foreach (int j in needed)
         {

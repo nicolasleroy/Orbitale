@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Orbitale.App.Controls"
+    xmlns:toolkit="using:CommunityToolkit.WinUI.Controls"
     xmlns:vm="using:Orbitale.App.ViewModels"
     Title="Orbitale">
 
@@ -118,16 +119,20 @@
                     <ToggleSplitButton.Flyout>
                         <Flyout Placement="Bottom">
                             <StackPanel Width="260" Spacing="8">
-                                <Slider
-                                    Header="{x:Bind controls:ViewFormat.Percent('Strength', ViewModel.CometStrength), Mode=OneWay}"
-                                    AutomationProperties.Name="Comet strength"
+                                <TextBlock Text="{x:Bind controls:ViewFormat.CometFade(ViewModel.CometFadeIn, ViewModel.CometFadeOut), Mode=OneWay}" />
+                                <toolkit:RangeSelector
+                                    AutomationProperties.Name="Comet fade in and fade out"
                                     Maximum="100"
                                     Minimum="0"
+                                    RangeEnd="{x:Bind ViewModel.CometFadeOut, Mode=TwoWay}"
+                                    RangeStart="{x:Bind ViewModel.CometFadeIn, Mode=TwoWay}"
                                     StepFrequency="1"
-                                    Value="{x:Bind ViewModel.CometStrength, Mode=TwoWay}" />
-                                <ToggleSwitch
-                                    Header="Comet head at start"
-                                    IsOn="{x:Bind ViewModel.HeadAtStart, Mode=TwoWay}" />
+                                    ToolTipService.ToolTip="Trails fade in up to the left handle and fade out after the right handle" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Text="Start of the sequence on the left, end on the right. Both handles at the right put the comet head at the end."
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Flyout>
                     </ToggleSplitButton.Flyout>

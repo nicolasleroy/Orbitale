@@ -12,7 +12,7 @@ public interface IFrameStatus
 
 /// <summary>
 /// The strip's frame states during a run. Frames are indexed like the run's <c>FrameSequence.Files</c>; the engine
-/// reports each processed frame by that index, in any order (reversed with "comet head at start"). The last reported
+/// reports each processed frame by that index, in any order. The last reported
 /// frame is Current; when the next one arrives (or the run ends) it becomes Done, or DoneWithTrails if trails were
 /// removed from it. Skipped frames are never touched. UI-free so it can be unit-tested; call it on the UI thread.
 /// </summary>
