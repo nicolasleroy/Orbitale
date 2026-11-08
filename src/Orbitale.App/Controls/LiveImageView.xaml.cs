@@ -11,7 +11,9 @@ using Microsoft.UI.Xaml.Shapes;
 using Orbitale.Engine.Imaging;
 using LineSegment = Orbitale.Engine.Trails.LineSegment;
 using Windows.Foundation;
+using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 using Windows.UI;
+using Windows.UI.ViewManagement;
 
 namespace Orbitale.App.Controls;
 
@@ -22,12 +24,14 @@ namespace Orbitale.App.Controls;
 /// resolution preview and the full result occupy the same space and zoom 1 is true 100 % (one source pixel per screen
 /// pixel) whatever is shown. Double-click toggles between zoom-to-fit and 100 %.
 /// A click on the image (mouse or pen) opens a loupe that shows the image at 100 % around that point, like Adobe
-/// Bridge's. Dragging on the image or dragging the loupe itself moves it, a click elsewhere on the image moves it there,
-/// and its close button (or Escape) closes it.
+/// Bridge's. It opens once the double-click time has passed (so a double-click only zooms), or as soon as the press
+/// turns into a drag. Dragging on the image or dragging the loupe itself moves it, a click elsewhere on the image moves
+/// it there, and its close button (or Escape) closes it. Scrolling or zooming the view carries it along with the image.
 /// </summary>
 public sealed partial class LiveImageView : UserControl
 {
     const double FlashOpacity = 0.8, FlashSeconds = 1.0, FlashThickness = 3;
+    const double DragThreshold = 4;   // DIPs a press must move to count as a drag of the loupe's point
     static readonly SolidColorBrush Amber = new(Color.FromArgb(0xFF, 0xF0, 0xA8, 0x30));
 
     public static readonly DependencyProperty HintProperty = DependencyProperty.Register(
@@ -53,6 +57,9 @@ public sealed partial class LiveImageView : UserControl
     enum LoupeDrag { None, Tip, Body }
     LoupeDrag _drag;                         // what the pointer drags: the magnified point (on the image) or the loupe
     Point _tip, _grab;                       // the loupe's sharp corner, and where the loupe was grabbed from it (view DIPs)
+    Point _at;                               // the magnified point (surface DIPs), which the loupe follows when the view moves
+    Point? _pendingTip;                      // a click that opens the loupe unless it turns out to be a double-click (view DIPs)
+    readonly DispatcherQueueTimer _loupeTimer;
     bool _left, _up;                         // the side of its sharp corner the loupe hangs on
 
     public LiveImageView()
@@ -61,6 +68,10 @@ public sealed partial class LiveImageView : UserControl
         _fadeTimer = DispatcherQueue.CreateTimer();
         _fadeTimer.Interval = TimeSpan.FromMilliseconds(33);
         _fadeTimer.Tick += (_, _) => FadeFlashes();
+        _loupeTimer = DispatcherQueue.CreateTimer();
+        _loupeTimer.Interval = TimeSpan.FromMilliseconds(new UISettings().DoubleClickTime);
+        _loupeTimer.IsRepeating = false;
+        _loupeTimer.Tick += (_, _) => OpenPendingLoupe();
     }
 
     public string Hint
@@ -96,9 +107,9 @@ public sealed partial class LiveImageView : UserControl
     {
         if (_bitmap is null || _bitmap.PixelWidth != img.Width || _bitmap.PixelHeight != img.Height)
         {
-            Picture.Source = null;   // let the old bitmap go before the new one is allocated
+            Picture.Source = LoupePicture.Source = null;   // let the old bitmap go before the new one is allocated
             _bitmap = new WriteableBitmap(img.Width, img.Height);
-            Picture.Source = _bitmap;
+            Picture.Source = LoupePicture.Source = _bitmap;   // the loupe shows the same bitmap: live updates show there too
         }
         using (var pixels = _bitmap.PixelBuffer.AsStream())
             pixels.Write(img.Bgra, 0, Math.Min(img.Bgra.Length, (int)pixels.Length));
@@ -114,6 +125,8 @@ public sealed partial class LiveImageView : UserControl
             _surfaceHeight = height;
             Surface.Width = width;
             Surface.Height = height;
+            LoupePicture.Width = width;   // at 100 %: one image pixel per screen pixel
+            LoupePicture.Height = height;
             ClearFlashes();
             HideLoupe();
             Scroller.UpdateLayout();
@@ -198,12 +211,12 @@ public sealed partial class LiveImageView : UserControl
     void Scroller_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_fit) ZoomToFit();
+        FollowImage();   // a resize moves the image (re-centred, or refitted) without a view change
     }
 
     void Scroller_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        // Scrolling or zooming moves the image under the loupe's tip; it would point at the wrong place.
-        if (_drag == LoupeDrag.None) HideLoupe();
+        FollowImage();
         // A zoom by the user (Ctrl+wheel, pinch) leaves fit mode, so resizing the window no longer refits.
         if (!e.IsIntermediate && _fit && FitZoom() is { } fit && Math.Abs(Scroller.ZoomFactor - fit) > 0.01) _fit = false;
     }
@@ -213,13 +226,51 @@ public sealed partial class LiveImageView : UserControl
         if (_bitmap is null || e.Pointer.PointerDeviceType == PointerDeviceType.Touch) return;   // touch pans
         if (!e.GetCurrentPoint(Picture).Properties.IsLeftButtonPressed) return;
         if (Picture.CapturePointer(e.Pointer)) _drag = LoupeDrag.Tip;
-        PlaceLoupe(e.GetCurrentPoint(LoupeLayer).Position, keepSide: false);
+        var p = e.GetCurrentPoint(LoupeLayer).Position;
+        if (Loupe.Visibility == Visibility.Visible) PlaceLoupe(p, keepSide: false);
+        else
+        {
+            // Wait out the double-click time: a double-click zooms and must not flash the loupe open and shut.
+            _pendingTip = p;
+            _loupeTimer.Stop();
+            _loupeTimer.Start();
+        }
         e.Handled = true;
     }
 
     void Picture_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_drag == LoupeDrag.Tip) PlaceLoupe(e.GetCurrentPoint(LoupeLayer).Position, keepSide: false);
+        if (_drag != LoupeDrag.Tip) return;
+        var p = e.GetCurrentPoint(LoupeLayer).Position;
+        if (_pendingTip is { } start)
+        {
+            if (Math.Abs(p.X - start.X) < DragThreshold && Math.Abs(p.Y - start.Y) < DragThreshold) return;
+            CancelPendingLoupe();   // a drag is not a double-click: open now
+        }
+        PlaceLoupe(p, keepSide: false);
+    }
+
+    void OpenPendingLoupe()
+    {
+        _loupeTimer.Stop();
+        if (_pendingTip is not { } tip) return;
+        _pendingTip = null;
+        PlaceLoupe(tip, keepSide: false);
+    }
+
+    void CancelPendingLoupe()
+    {
+        _loupeTimer.Stop();
+        _pendingTip = null;
+    }
+
+    /// <summary>After the view moved under it (scroll, zoom, resize), puts the loupe back on its point of the image.</summary>
+    void FollowImage()
+    {
+        if (Loupe.Visibility != Visibility.Visible || _drag != LoupeDrag.None || _bitmap is null) return;
+        var tip = Surface.TransformToVisual(LoupeLayer).TransformPoint(_at);
+        if (tip.X < 0 || tip.Y < 0 || tip.X > LoupeLayer.ActualWidth || tip.Y > LoupeLayer.ActualHeight) HideLoupe();   // scrolled out of view
+        else PlaceLoupe(tip, keepSide: false);
     }
 
     void Picture_PointerReleased(object sender, PointerRoutedEventArgs e)
@@ -251,6 +302,28 @@ public sealed partial class LiveImageView : UserControl
         if (_drag != LoupeDrag.Body) return;
         _drag = LoupeDrag.None;
         Loupe.ReleasePointerCapture(e.Pointer);
+    }
+
+    /// <summary>
+    /// The loupe lies above the scroll viewer, not inside it, so it passes the wheel on: Ctrl+wheel zooms around the
+    /// pointer, Shift+wheel or a horizontal wheel scrolls sideways, the wheel scrolls up and down.
+    /// </summary>
+    void Loupe_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (_bitmap is null) return;
+        var pt = e.GetCurrentPoint(Scroller);
+        int delta = pt.Properties.MouseWheelDelta;
+        if (e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control))
+        {
+            float zoom = Math.Clamp(Scroller.ZoomFactor * (float)Math.Pow(1.1, delta / 120.0), Scroller.MinZoomFactor, Scroller.MaxZoomFactor);
+            var at = e.GetCurrentPoint(Surface).Position;   // stays under the pointer
+            _fit = false;
+            Scroller.ChangeView(at.X * zoom - pt.Position.X, at.Y * zoom - pt.Position.Y, zoom, true);
+        }
+        else if (pt.Properties.IsHorizontalMouseWheel) Scroller.ChangeView(Scroller.HorizontalOffset + delta, null, null);
+        else if (e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift)) Scroller.ChangeView(Scroller.HorizontalOffset - delta, null, null);
+        else Scroller.ChangeView(null, Scroller.VerticalOffset - delta, null);
     }
 
     void LoupeClose_Click(object sender, RoutedEventArgs e) => HideLoupe();
@@ -292,27 +365,23 @@ public sealed partial class LiveImageView : UserControl
         _tip = tip;
         var at = LoupeLayer.TransformToVisual(Surface).TransformPoint(tip);
         double x = Math.Clamp(at.X, 0, _surfaceWidth), y = Math.Clamp(at.Y, 0, _surfaceHeight);
+        _at = new Point(x, y);
 
-        if (LoupePicture.Source != _bitmap) LoupePicture.Source = _bitmap;   // the same bitmap: live updates show too
-        LoupePicture.Width = _surfaceWidth;
-        LoupePicture.Height = _surfaceHeight;
-
-        bool l = _left, u = _up;
-        Canvas.SetLeft(Loupe, Snap(l ? tip.X - size : tip.X));
-        Canvas.SetTop(Loupe, Snap(u ? tip.Y - size : tip.Y));
+        Canvas.SetLeft(Loupe, Snap(_left ? tip.X - size : tip.X));
+        Canvas.SetTop(Loupe, Snap(_up ? tip.Y - size : tip.Y));
         const double r = 24;
-        Loupe.CornerRadius = new CornerRadius(!l && !u ? 0 : r, l && !u ? 0 : r, l && u ? 0 : r, !l && u ? 0 : r);
+        Loupe.CornerRadius = new CornerRadius(
+            !_left && !_up ? 0 : r, _left && !_up ? 0 : r, _left && _up ? 0 : r, !_left && _up ? 0 : r);
         // The close button takes the corner diagonally opposite the sharp one, the label the corner beside it.
-        LoupeClose.HorizontalAlignment = l ? HorizontalAlignment.Left : HorizontalAlignment.Right;
-        LoupeClose.VerticalAlignment = u ? VerticalAlignment.Top : VerticalAlignment.Bottom;
-        LoupeLabel.HorizontalAlignment = l ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-        LoupeLabel.VerticalAlignment = u ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+        LoupeClose.HorizontalAlignment = _left ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        LoupeClose.VerticalAlignment = _up ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+        LoupeLabel.HorizontalAlignment = _left ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        LoupeLabel.VerticalAlignment = _up ? VerticalAlignment.Top : VerticalAlignment.Bottom;
 
         // The magnified point sits at the loupe's centre, except near the image's edges: there the view stops at the
-        // edge, so the loupe never shows the void beyond the image.
+        // edge, so the loupe never shows the void beyond the image. (LoupeCanvas is clipped to `inner` in the XAML.)
         Canvas.SetLeft(LoupePicture, Snap(inner / 2 - InsideImage(x, _surfaceWidth, inner)));
         Canvas.SetTop(LoupePicture, Snap(inner / 2 - InsideImage(y, _surfaceHeight, inner)));
-        LoupeCanvas.Clip = new RectangleGeometry { Rect = new Rect(0, 0, inner, inner) };
         Loupe.Visibility = Visibility.Visible;
     }
 
@@ -332,6 +401,7 @@ public sealed partial class LiveImageView : UserControl
 
     void HideLoupe()
     {
+        CancelPendingLoupe();
         Loupe.Visibility = Visibility.Collapsed;
     }
 

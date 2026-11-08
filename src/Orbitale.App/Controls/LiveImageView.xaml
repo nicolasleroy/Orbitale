@@ -43,31 +43,8 @@
             Style="{StaticResource SubtitleTextBlockStyle}"
             Text="{x:Bind Hint, Mode=OneWay}" />
 
-        <!-- Badge: "Live · frame 141 / 279", the result, or the original frame being viewed. -->
-        <Border
-            x:Name="Badge"
-            Margin="12"
-            Padding="10,4"
-            HorizontalAlignment="Left"
-            VerticalAlignment="Top"
-            Background="#B0000000"
-            CornerRadius="6"
-            Visibility="Collapsed">
-            <StackPanel Orientation="Horizontal" Spacing="10">
-                <TextBlock
-                    VerticalAlignment="Center"
-                    Foreground="White"
-                    Text="{x:Bind BadgeText, Mode=OneWay}" />
-                <HyperlinkButton
-                    x:Name="BackButton"
-                    Padding="6,2"
-                    Command="{x:Bind BackCommand, Mode=OneWay}"
-                    Content="Back to result"
-                    Visibility="Collapsed" />
-            </StackPanel>
-        </Border>
-
-        <!-- Loupe: the image at 100 % around the clicked point. Its sharp corner points at that point. -->
+        <!-- Loupe: the image at 100 % around the clicked point. Its sharp corner points at that point.
+             Below the badge, so it never hides the Back button. -->
         <Canvas x:Name="LoupeLayer">
             <Border
                 x:Name="Loupe"
@@ -81,9 +58,14 @@
                 PointerMoved="Loupe_PointerMoved"
                 PointerPressed="Loupe_PointerPressed"
                 PointerReleased="Loupe_PointerReleased"
+                PointerWheelChanged="Loupe_PointerWheelChanged"
                 Visibility="Collapsed">
                 <Grid>
+                    <!-- 232 = the loupe's 240 less its two 4-DIP borders. -->
                     <Canvas x:Name="LoupeCanvas">
+                        <Canvas.Clip>
+                            <RectangleGeometry Rect="0,0,232,232" />
+                        </Canvas.Clip>
                         <Image x:Name="LoupePicture" Stretch="Fill" />
                     </Canvas>
                     <Border
@@ -116,6 +98,30 @@
                 </Grid>
             </Border>
         </Canvas>
+
+        <!-- Badge: "Live · frame 141 / 279", the result, or the original frame being viewed. -->
+        <Border
+            x:Name="Badge"
+            Margin="12"
+            Padding="10,4"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
+            Background="#B0000000"
+            CornerRadius="6"
+            Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <TextBlock
+                    VerticalAlignment="Center"
+                    Foreground="White"
+                    Text="{x:Bind BadgeText, Mode=OneWay}" />
+                <HyperlinkButton
+                    x:Name="BackButton"
+                    Padding="6,2"
+                    Command="{x:Bind BackCommand, Mode=OneWay}"
+                    Content="Back to result"
+                    Visibility="Collapsed" />
+            </StackPanel>
+        </Border>
     </Grid>
     <UserControl.KeyboardAccelerators>
         <KeyboardAccelerator Key="Escape" Invoked="Escape_Invoked" />
