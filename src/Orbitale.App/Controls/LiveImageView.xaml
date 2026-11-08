@@ -2,7 +2,8 @@
 <UserControl
     x:Class="Orbitale.App.Controls.LiveImageView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    KeyboardAcceleratorPlacementMode="Hidden">
     <Grid Background="{StaticResource WindowBackgroundBrush}">
         <!-- Zoom 1 = one source pixel per physical pixel (the surface is sized in DIPs for that). -->
         <ScrollViewer
@@ -22,7 +23,13 @@
                 x:Name="Surface"
                 HorizontalAlignment="Center"
                 VerticalAlignment="Center">
-                <Image x:Name="Picture" Stretch="Fill" />
+                <Image
+                    x:Name="Picture"
+                    PointerCaptureLost="Picture_PointerReleased"
+                    PointerMoved="Picture_PointerMoved"
+                    PointerPressed="Picture_PointerPressed"
+                    PointerReleased="Picture_PointerReleased"
+                    Stretch="Fill" />
                 <Canvas x:Name="Overlay" IsHitTestVisible="False" />
             </Grid>
         </ScrollViewer>
@@ -59,5 +66,58 @@
                     Visibility="Collapsed" />
             </StackPanel>
         </Border>
+
+        <!-- Loupe: the image at 100 % around the clicked point. Its sharp corner points at that point. -->
+        <Canvas x:Name="LoupeLayer">
+            <Border
+                x:Name="Loupe"
+                Width="240"
+                Height="240"
+                AutomationProperties.Name="Loupe at 100 percent"
+                Background="Black"
+                BorderBrush="#F0101010"
+                BorderThickness="4"
+                PointerCaptureLost="Loupe_PointerReleased"
+                PointerMoved="Loupe_PointerMoved"
+                PointerPressed="Loupe_PointerPressed"
+                PointerReleased="Loupe_PointerReleased"
+                Visibility="Collapsed">
+                <Grid>
+                    <Canvas x:Name="LoupeCanvas">
+                        <Image x:Name="LoupePicture" Stretch="Fill" />
+                    </Canvas>
+                    <Border
+                        x:Name="LoupeLabel"
+                        Margin="6"
+                        Padding="6,1"
+                        Background="#B0000000"
+                        CornerRadius="4"
+                        IsHitTestVisible="False">
+                        <TextBlock
+                            FontSize="11"
+                            Foreground="White"
+                            Text="100 %" />
+                    </Border>
+                    <Button
+                        x:Name="LoupeClose"
+                        Width="26"
+                        Height="26"
+                        Margin="6"
+                        Padding="0"
+                        AutomationProperties.Name="Close the loupe"
+                        Background="#B0000000"
+                        BorderThickness="0"
+                        Click="LoupeClose_Click"
+                        CornerRadius="13"
+                        Foreground="White"
+                        ToolTipService.ToolTip="Close the loupe (Esc)">
+                        <FontIcon FontSize="10" Glyph="&#xE711;" />
+                    </Button>
+                </Grid>
+            </Border>
+        </Canvas>
     </Grid>
+    <UserControl.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Escape" Invoked="Escape_Invoked" />
+    </UserControl.KeyboardAccelerators>
 </UserControl>

@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml.Shapes;
 using Orbitale.Engine.Imaging;
 using LineSegment = Orbitale.Engine.Trails.LineSegment;
@@ -20,6 +21,9 @@ namespace Orbitale.App.Controls;
 /// The image is laid out at its <b>source</b> size (the full-resolution width given to <see cref="Show"/>), so a low
 /// resolution preview and the full result occupy the same space and zoom 1 is true 100 % (one source pixel per screen
 /// pixel) whatever is shown. Double-click toggles between zoom-to-fit and 100 %.
+/// A click on the image (mouse or pen) opens a loupe that shows the image at 100 % around that point, like Adobe
+/// Bridge's. Dragging on the image or dragging the loupe itself moves it, a click elsewhere on the image moves it there,
+/// and its close button (or Escape) closes it.
 /// </summary>
 public sealed partial class LiveImageView : UserControl
 {
@@ -46,6 +50,10 @@ public sealed partial class LiveImageView : UserControl
     double _surfaceWidth, _surfaceHeight;   // DIPs
     double _dipsPerPixel;                    // DIPs per pixel of the image shown (maps overlay coordinates)
     bool _fit = true;
+    enum LoupeDrag { None, Tip, Body }
+    LoupeDrag _drag;                         // what the pointer drags: the magnified point (on the image) or the loupe
+    Point _tip, _grab;                       // the loupe's sharp corner, and where the loupe was grabbed from it (view DIPs)
+    bool _left, _up;                         // the side of its sharp corner the loupe hangs on
 
     public LiveImageView()
     {
@@ -107,6 +115,7 @@ public sealed partial class LiveImageView : UserControl
             Surface.Width = width;
             Surface.Height = height;
             ClearFlashes();
+            HideLoupe();
             Scroller.UpdateLayout();
             ZoomToFit();
         }
@@ -115,7 +124,9 @@ public sealed partial class LiveImageView : UserControl
     /// <summary>Removes the image and releases its bitmap, so a full-resolution one does not outlive its use; the hint shows again.</summary>
     public void Clear()
     {
+        HideLoupe();
         Picture.Source = null;
+        LoupePicture.Source = null;
         _bitmap = null;
         _surfaceWidth = _surfaceHeight = 0;   // the next image fits the view
         ClearFlashes();
@@ -178,6 +189,7 @@ public sealed partial class LiveImageView : UserControl
     void Scroller_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         if (_bitmap is null) return;
+        HideLoupe();
         if (Math.Abs(Scroller.ZoomFactor - 1) < 0.01) ZoomToFit();
         else ZoomAround(1f, e.GetPosition(Surface));
         e.Handled = true;
@@ -190,8 +202,137 @@ public sealed partial class LiveImageView : UserControl
 
     void Scroller_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
+        // Scrolling or zooming moves the image under the loupe's tip; it would point at the wrong place.
+        if (_drag == LoupeDrag.None) HideLoupe();
         // A zoom by the user (Ctrl+wheel, pinch) leaves fit mode, so resizing the window no longer refits.
         if (!e.IsIntermediate && _fit && FitZoom() is { } fit && Math.Abs(Scroller.ZoomFactor - fit) > 0.01) _fit = false;
+    }
+
+    void Picture_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_bitmap is null || e.Pointer.PointerDeviceType == PointerDeviceType.Touch) return;   // touch pans
+        if (!e.GetCurrentPoint(Picture).Properties.IsLeftButtonPressed) return;
+        if (Picture.CapturePointer(e.Pointer)) _drag = LoupeDrag.Tip;
+        PlaceLoupe(e.GetCurrentPoint(LoupeLayer).Position, keepSide: false);
+        e.Handled = true;
+    }
+
+    void Picture_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag == LoupeDrag.Tip) PlaceLoupe(e.GetCurrentPoint(LoupeLayer).Position, keepSide: false);
+    }
+
+    void Picture_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag != LoupeDrag.Tip) return;
+        _drag = LoupeDrag.None;
+        Picture.ReleasePointerCapture(e.Pointer);
+    }
+
+    /// <summary>Grabbing the loupe drags it: its sharp corner moves with the pointer and the view inside follows.</summary>
+    void Loupe_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (!e.GetCurrentPoint(Loupe).Properties.IsLeftButtonPressed || !Loupe.CapturePointer(e.Pointer)) return;
+        var p = e.GetCurrentPoint(LoupeLayer).Position;
+        _grab = new Point(p.X - _tip.X, p.Y - _tip.Y);
+        _drag = LoupeDrag.Body;
+    }
+
+    void Loupe_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag != LoupeDrag.Body) return;
+        var p = e.GetCurrentPoint(LoupeLayer).Position;
+        PlaceLoupe(new Point(p.X - _grab.X, p.Y - _grab.Y), keepSide: true);   // no flip under the hand
+    }
+
+    void Loupe_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag != LoupeDrag.Body) return;
+        _drag = LoupeDrag.None;
+        Loupe.ReleasePointerCapture(e.Pointer);
+    }
+
+    void LoupeClose_Click(object sender, RoutedEventArgs e) => HideLoupe();
+
+    void Escape_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (Loupe.Visibility != Visibility.Visible) return;
+        HideLoupe();
+        args.Handled = true;
+    }
+
+    /// <summary>
+    /// Puts the loupe's sharp corner at <paramref name="tip"/> (view coordinates) and shows the image at 100 % from that
+    /// point. The loupe hangs below and to the right of its corner, flipping to the other side near the view's edges;
+    /// with <paramref name="keepSide"/> it keeps its side and the corner is held where the loupe stays in view.
+    /// </summary>
+    void PlaceLoupe(Point tip, bool keepSide)
+    {
+        if (_bitmap is null || _surfaceWidth <= 0) return;
+        double size = Loupe.Width, inner = size - Loupe.BorderThickness.Left - Loupe.BorderThickness.Right;
+        double viewW = LoupeLayer.ActualWidth, viewH = LoupeLayer.ActualHeight;
+        if (keepSide)
+        {
+            double minX = _left ? size : 0, maxX = Math.Max(minX, _left ? viewW : viewW - size);
+            double minY = _up ? size : 0, maxY = Math.Max(minY, _up ? viewH : viewH - size);
+            tip = new Point(Math.Clamp(tip.X, minX, maxX), Math.Clamp(tip.Y, minY, maxY));
+        }
+        else
+        {
+            _left = tip.X + size > viewW && tip.X - size >= 0;
+            _up = tip.Y + size > viewH && tip.Y - size >= 0;
+        }
+        // The sharp corner never leaves the visible part of the image: dragged past an edge, the loupe sticks to it.
+        var toView = Surface.TransformToVisual(LoupeLayer);
+        Point topLeft = toView.TransformPoint(new Point(0, 0)), bottomRight = toView.TransformPoint(new Point(_surfaceWidth, _surfaceHeight));
+        double x0 = Math.Max(topLeft.X, 0), x1 = Math.Min(bottomRight.X, viewW);
+        double y0 = Math.Max(topLeft.Y, 0), y1 = Math.Min(bottomRight.Y, viewH);
+        if (x1 > x0 && y1 > y0) tip = new Point(Math.Clamp(tip.X, x0, x1), Math.Clamp(tip.Y, y0, y1));
+        _tip = tip;
+        var at = LoupeLayer.TransformToVisual(Surface).TransformPoint(tip);
+        double x = Math.Clamp(at.X, 0, _surfaceWidth), y = Math.Clamp(at.Y, 0, _surfaceHeight);
+
+        if (LoupePicture.Source != _bitmap) LoupePicture.Source = _bitmap;   // the same bitmap: live updates show too
+        LoupePicture.Width = _surfaceWidth;
+        LoupePicture.Height = _surfaceHeight;
+
+        bool l = _left, u = _up;
+        Canvas.SetLeft(Loupe, Snap(l ? tip.X - size : tip.X));
+        Canvas.SetTop(Loupe, Snap(u ? tip.Y - size : tip.Y));
+        const double r = 24;
+        Loupe.CornerRadius = new CornerRadius(!l && !u ? 0 : r, l && !u ? 0 : r, l && u ? 0 : r, !l && u ? 0 : r);
+        // The close button takes the corner diagonally opposite the sharp one, the label the corner beside it.
+        LoupeClose.HorizontalAlignment = l ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        LoupeClose.VerticalAlignment = u ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+        LoupeLabel.HorizontalAlignment = l ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        LoupeLabel.VerticalAlignment = u ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+
+        // The magnified point sits at the loupe's centre, except near the image's edges: there the view stops at the
+        // edge, so the loupe never shows the void beyond the image.
+        Canvas.SetLeft(LoupePicture, Snap(inner / 2 - InsideImage(x, _surfaceWidth, inner)));
+        Canvas.SetTop(LoupePicture, Snap(inner / 2 - InsideImage(y, _surfaceHeight, inner)));
+        LoupeCanvas.Clip = new RectangleGeometry { Rect = new Rect(0, 0, inner, inner) };
+        Loupe.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Moves a centre coordinate so a window <paramref name="window"/> wide around it stays within an image
+    /// <paramref name="length"/> long (an image smaller than the window is centred).
+    /// </summary>
+    static double InsideImage(double centre, double length, double window) =>
+        length <= window ? length / 2 : Math.Clamp(centre, window / 2, length - window / 2);
+
+    /// <summary>Rounds a DIP offset to a whole physical pixel, so 100 % maps each image pixel onto one screen pixel.</summary>
+    double Snap(double dips)
+    {
+        double scale = XamlRoot?.RasterizationScale ?? 1;
+        return Math.Round(dips * scale) / scale;
+    }
+
+    void HideLoupe()
+    {
+        Loupe.Visibility = Visibility.Collapsed;
     }
 
     void FadeFlashes()
